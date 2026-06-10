@@ -8,7 +8,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-rmk = { version = "0.8", features = [
+rmk = { path = "../../common/rmk-0.8.2-eh", features = [
     "nrf52840_ble",
     "async_matrix",
     "adafruit_bl",

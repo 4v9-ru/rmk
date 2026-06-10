@@ -2,18 +2,18 @@
 ///
 /// Mode switching handled entirely here (NO LT/TH in keyboard.toml):
 /// - MouseBtn1 (RMK)  → normal click + cursor
-/// - User12 (hold)    → Sniper mode (slow cursor)
-/// - User12 (tap)     → MB2 click (right-click) — sent from our code
-/// - MB1 + User12     → Scroll mode (trackball = wheel)
-/// - MB1 + User12 tap → MB3 click (middle button)
+/// - User14 (hold)    → Sniper mode (slow cursor)
+/// - User14 (tap)     → MB2 click (right-click) — sent from our code
+/// - MB1 + User14     → Scroll mode (trackball = wheel)
+/// - MB1 + User14 tap → MB3 click (middle button)
 ///
-/// keyboard.toml uses: MouseBtn1, User12 (no MouseBtn2 to avoid RMK auto-sending it)
+/// keyboard.toml uses: MouseBtn1, User14 (no MouseBtn2 to avoid RMK auto-sending it)
 ///
 /// ## Runtime settings via User keycodes:
-/// - User8  = Scroll divisor +1
-/// - User9  = Scroll divisor -1
-/// - User10 = Sniper divisor +1
-/// - User11 = Sniper divisor -1
+/// - User10 = Scroll divisor +1
+/// - User11 = Scroll divisor -1
+/// - User12 = Sniper divisor +1
+/// - User13 = Sniper divisor -1
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
@@ -87,22 +87,22 @@ fn now_ms() -> u32 {
 /// Handle User keycodes for runtime divisor adjustment.
 pub fn handle_user_keycode(keycode_idx: u8) {
     match keycode_idx {
-        8 => {
+        10 => {
             let v = (SCROLL_DIVISOR.load(Ordering::Relaxed) + 1).min(SCROLL_DIVISOR_MAX);
             SCROLL_DIVISOR.store(v, Ordering::Relaxed);
             defmt::info!("Scroll divisor: {}", v);
         }
-        9 => {
+        11 => {
             let v = SCROLL_DIVISOR.load(Ordering::Relaxed).saturating_sub(1).max(SCROLL_DIVISOR_MIN);
             SCROLL_DIVISOR.store(v, Ordering::Relaxed);
             defmt::info!("Scroll divisor: {}", v);
         }
-        10 => {
+        12 => {
             let v = (SNIPER_DIVISOR.load(Ordering::Relaxed) + 1).min(SNIPER_DIVISOR_MAX);
             SNIPER_DIVISOR.store(v, Ordering::Relaxed);
             defmt::info!("Sniper divisor: {}", v);
         }
-        11 => {
+        13 => {
             let v = SNIPER_DIVISOR.load(Ordering::Relaxed).saturating_sub(1).max(SNIPER_DIVISOR_MIN);
             SNIPER_DIVISOR.store(v, Ordering::Relaxed);
             defmt::info!("Sniper divisor: {}", v);
@@ -242,11 +242,11 @@ async fn send_mb3_click() {
 
 /// Background task: button-driven mode switching + combo detection.
 ///
-/// Button mapping (User12 is the "right button" keycode):
-/// - User12 hold alone  → Sniper mode (slow cursor, NO right-click sent)
-/// - User12 tap alone   → MB2 click (right-click)
-/// - MB1 + User12 hold  → Scroll mode
-/// - MB1 + User12 tap   → MB3 click (middle-button)
+/// Button mapping (User14 is the "right button" keycode):
+/// - User14 hold alone  → Sniper mode (slow cursor, NO right-click sent)
+/// - User14 tap alone   → MB2 click (right-click)
+/// - MB1 + User14 hold  → Scroll mode
+/// - MB1 + User14 tap   → MB3 click (middle-button)
 /// - MB1 alone          → normal click (handled by RMK)
 #[embassy_executor::task]
 pub async fn trackball_tick_task() {
@@ -331,12 +331,12 @@ pub async fn trackball_tick_task() {
                                         }
                                     }
                                 }
-                                KeyCode::User12 => {
+                                KeyCode::User14 => {
                                     // "Right button" — handled entirely by us (no RMK HID)
                                     mb2_held = !mb2_held;
 
                                     if mb2_held {
-                                        // User12 pressed
+                                        // User14 pressed
                                         mb2_press_time = now;
                                         // Check combo: MB1 already held?
                                         if mb1_held && now.wrapping_sub(mb1_press_time) < COMBO_WINDOW_MS {
@@ -348,12 +348,12 @@ pub async fn trackball_tick_task() {
                                             SCROLL_ACCUM_Y.store(0, Ordering::Relaxed);
                                             defmt::info!("Combo: Scroll ON");
                                         } else {
-                                            // Solo User12 → Sniper mode
+                                            // Solo User14 -> Sniper mode
                                             MODE_SNIPER.store(true, Ordering::Relaxed);
                                             defmt::info!("Sniper ON");
                                         }
                                     } else {
-                                        // User12 released
+                                        // User14 released
                                         if combo_active {
                                             let held = now.wrapping_sub(combo_start_time);
                                             combo_active = false;
@@ -370,7 +370,7 @@ pub async fn trackball_tick_task() {
                                             }
                                             defmt::info!("Combo: Scroll OFF");
                                         } else {
-                                            // Solo User12 released
+                                            // Solo User14 released
                                             let held = now.wrapping_sub(mb2_press_time);
                                             MODE_SNIPER.store(false, Ordering::Relaxed);
                                             defmt::info!("Sniper OFF");
@@ -383,22 +383,22 @@ pub async fn trackball_tick_task() {
                                         }
                                     }
                                 }
-                                KeyCode::User8 => {
+                                KeyCode::User10 => {
                                     let v = (SCROLL_DIVISOR.load(Ordering::Relaxed) + 1).min(SCROLL_DIVISOR_MAX);
                                     SCROLL_DIVISOR.store(v, Ordering::Relaxed);
                                     defmt::info!("Scroll divisor: {}", v);
                                 }
-                                KeyCode::User9 => {
+                                KeyCode::User11 => {
                                     let v = SCROLL_DIVISOR.load(Ordering::Relaxed).saturating_sub(1).max(SCROLL_DIVISOR_MIN);
                                     SCROLL_DIVISOR.store(v, Ordering::Relaxed);
                                     defmt::info!("Scroll divisor: {}", v);
                                 }
-                                KeyCode::User10 => {
+                                KeyCode::User12 => {
                                     let v = (SNIPER_DIVISOR.load(Ordering::Relaxed) + 1).min(SNIPER_DIVISOR_MAX);
                                     SNIPER_DIVISOR.store(v, Ordering::Relaxed);
                                     defmt::info!("Sniper divisor: {}", v);
                                 }
-                                KeyCode::User11 => {
+                                KeyCode::User13 => {
                                     let v = SNIPER_DIVISOR.load(Ordering::Relaxed).saturating_sub(1).max(SNIPER_DIVISOR_MIN);
                                     SNIPER_DIVISOR.store(v, Ordering::Relaxed);
                                     defmt::info!("Sniper divisor: {}", v);

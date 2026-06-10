@@ -4,56 +4,43 @@
 /// - Layer 5 (Scroll): trackball → scroll wheel
 /// - Layer 6 (Sniper): trackball speed reduced
 ///
-/// ## Runtime settings via User keycodes (in Adjust layer):
-/// - User0 = CPI +100          User1 = CPI -100
-/// - User2 = Scroll divisor +1  User3 = Scroll divisor -1  (higher = slower scroll)
-/// - User4 = Sniper divisor +1  User5 = Sniper divisor -1  (higher = slower sniper)
+/// Runtime settings are exposed in Vial's Keyboard Settings tab.
 use core::cell::RefCell;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
-use rmk::embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Instant, Timer};
-use rmk::channel::{CONTROLLER_CHANNEL, KEY_EVENT_CHANNEL, KEYBOARD_REPORT_CHANNEL};
-use rmk::event::{ControllerEvent, Event, KeyboardEvent};
+use rmk::channel::{CONTROLLER_CHANNEL, KEYBOARD_REPORT_CHANNEL};
+use rmk::descriptor::KeyboardReport;
+use rmk::embassy_futures::select::{select, Either};
+use rmk::event::{ControllerEvent, Event};
 use rmk::hid::Report;
-use usbd_hid::descriptor::MouseReport;
 use rmk::input_device::{InputProcessor, ProcessResult};
 use rmk::keymap::KeyMap;
+use usbd_hid::descriptor::MouseReport;
 
 // Layer numbers
-const LAYER_MOUSE: u8 = 4;
 const LAYER_SCROLL: u8 = 5;
 const LAYER_SNIPER: u8 = 6;
 
-// Virtual key at row=8, col=0 → MO(4) in Base layer
-pub const AUTO_MOUSE_VIRTUAL_ROW: u8 = 8;
-pub const AUTO_MOUSE_VIRTUAL_COL: u8 = 0;
+const MODE_SNIPER: u8 = 1;
+const MODE_SCROLL: u8 = 2;
+const MODE_TEXT: u8 = 3;
 
-// Auto-mouse timeout: 500ms
-const TIMEOUT_DECISECONDS: u32 = 5;
+const HID_ARROW_RIGHT: u8 = 0x4F;
+const HID_ARROW_LEFT: u8 = 0x50;
+const HID_ARROW_DOWN: u8 = 0x51;
+const HID_ARROW_UP: u8 = 0x52;
 
-// Default scroll divisor (higher = slower). QMK default = 16 for slow scroll.
-// Value 5 is a middle ground — adjust with User2/User3 keys.
-const SCROLL_DIVISOR_DEFAULT: u32 = 5;
-const SCROLL_DIVISOR_MIN: u32 = 1;
-const SCROLL_DIVISOR_MAX: u32 = 32;
-
-// Default sniper divisor
-const SNIPER_DIVISOR_DEFAULT: u32 = 4;
-const SNIPER_DIVISOR_MIN: u32 = 1;
-const SNIPER_DIVISOR_MAX: u32 = 16;
+const AUTO_LAYER_NONE: u8 = 0xFF;
+const AUTO_LAYER_IDLE_MS: u32 = 350;
 
 /// Shared state
 static LAST_MOTION_T: AtomicU32 = AtomicU32::new(0);
-static LAYER_ACTIVE: AtomicBool = AtomicBool::new(false);
 static ACTIVE_LAYER: AtomicU8 = AtomicU8::new(0);
+static ACTIVE_AUTO_LAYER: AtomicU8 = AtomicU8::new(AUTO_LAYER_NONE);
 /// Current mouse button state (bitmask: bit0=MB1, bit1=MB2, bit2=MB3...)
 /// Updated by auto_mouse_tick_task via ControllerEvent::Key
 static MOUSE_BUTTONS: AtomicU8 = AtomicU8::new(0);
-
-/// Runtime-adjustable settings (RAM only, reset to defaults on power-off)
-static SCROLL_DIVISOR: AtomicU32 = AtomicU32::new(SCROLL_DIVISOR_DEFAULT);
-static SNIPER_DIVISOR: AtomicU32 = AtomicU32::new(SNIPER_DIVISOR_DEFAULT);
 
 /// Scroll accumulators
 static SCROLL_ACCUM_X: AtomicI32 = AtomicI32::new(0);
@@ -73,9 +60,6 @@ impl AtomicI32 {
     const fn new(v: i32) -> Self {
         Self(core::sync::atomic::AtomicU32::new(v as u32))
     }
-    fn load(&self, ord: Ordering) -> i32 {
-        self.0.load(ord) as i32
-    }
     fn store(&self, v: i32, ord: Ordering) {
         self.0.store(v as u32, ord);
     }
@@ -84,46 +68,36 @@ impl AtomicI32 {
     }
 }
 
-fn now_deciseconds() -> u32 {
-    (Instant::now().as_ticks() / (embassy_time::TICK_HZ / 10)) as u32
-}
-
 fn now_ms() -> u32 {
     (Instant::now().as_ticks() / (embassy_time::TICK_HZ / 1000)) as u32
 }
 
-/// Handle User keycodes for runtime trackball settings.
-/// User0-User7 are reserved for BLE profile switching (handled natively by RMK).
-/// User8-User11 are for trackball sensitivity.
+async fn tap_keyboard_key(keycode: u8) {
+    let mut report = KeyboardReport::default();
+    report.keycodes[0] = keycode;
+    KEYBOARD_REPORT_CHANNEL
+        .send(Report::KeyboardReport(report))
+        .await;
+    KEYBOARD_REPORT_CHANNEL
+        .send(Report::KeyboardReport(KeyboardReport::default()))
+        .await;
+}
+
+/// Handle User keycodes for runtime trackball mode switching.
+/// User0-User9 are reserved for BLE profile switching (handled natively by RMK).
+/// User10-User12 are for trackball mode switching.
 pub fn handle_user_keycode(keycode_idx: u8, pressed: bool) {
+    if !pressed && (10..=12).contains(&keycode_idx) && !rmk::vial_settings::sticky_mode() {
+        rmk::vial_settings::set_mode(0);
+        return;
+    }
     if !pressed {
         return;
     }
     match keycode_idx {
-        // User8: Scroll slower (+divisor)
-        8 => {
-            let v = (SCROLL_DIVISOR.load(Ordering::Relaxed) + 1).min(SCROLL_DIVISOR_MAX);
-            SCROLL_DIVISOR.store(v, Ordering::Relaxed);
-            defmt::info!("Scroll divisor: {}", v);
-        }
-        // User9: Scroll faster (-divisor)
-        9 => {
-            let v = SCROLL_DIVISOR.load(Ordering::Relaxed).saturating_sub(1).max(SCROLL_DIVISOR_MIN);
-            SCROLL_DIVISOR.store(v, Ordering::Relaxed);
-            defmt::info!("Scroll divisor: {}", v);
-        }
-        // User10: Sniper slower (+divisor)
-        10 => {
-            let v = (SNIPER_DIVISOR.load(Ordering::Relaxed) + 1).min(SNIPER_DIVISOR_MAX);
-            SNIPER_DIVISOR.store(v, Ordering::Relaxed);
-            defmt::info!("Sniper divisor: {}", v);
-        }
-        // User11: Sniper faster (-divisor)
-        11 => {
-            let v = SNIPER_DIVISOR.load(Ordering::Relaxed).saturating_sub(1).max(SNIPER_DIVISOR_MIN);
-            SNIPER_DIVISOR.store(v, Ordering::Relaxed);
-            defmt::info!("Sniper divisor: {}", v);
-        }
+        10 => rmk::vial_settings::set_mode(MODE_SNIPER),
+        11 => rmk::vial_settings::set_mode(MODE_SCROLL),
+        12 => rmk::vial_settings::set_mode(MODE_TEXT),
         _ => {}
     }
 }
@@ -145,6 +119,32 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
     pub fn new(keymap: &'a RefCell<KeyMap<'a, ROW, COL, NUM_LAYER, NUM_ENCODER>>) -> Self {
         Self { keymap }
     }
+
+    fn sync_auto_layer_for_motion(&self, mode: u8) {
+        if rmk::vial_settings::auto_layer_enabled_for_mode(mode) {
+            let layer = rmk::vial_settings::auto_layer();
+            LAST_MOTION_T.store(now_ms(), Ordering::Relaxed);
+            let previous = ACTIVE_AUTO_LAYER.swap(layer, Ordering::Relaxed);
+            if previous != layer {
+                let mut keymap = self.keymap.borrow_mut();
+                if previous != AUTO_LAYER_NONE {
+                    keymap.deactivate_layer(previous);
+                }
+                if layer != 0 {
+                    keymap.activate_layer(layer);
+                }
+            }
+        } else {
+            self.deactivate_auto_layer();
+        }
+    }
+
+    fn deactivate_auto_layer(&self) {
+        let previous = ACTIVE_AUTO_LAYER.swap(AUTO_LAYER_NONE, Ordering::Relaxed);
+        if previous != AUTO_LAYER_NONE {
+            self.keymap.borrow_mut().deactivate_layer(previous);
+        }
+    }
 }
 
 impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_ENCODER: usize>
@@ -156,14 +156,14 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
             return ProcessResult::Continue(event);
         };
 
-        // Update auto-mouse timeout
-        LAST_MOTION_T.store(now_deciseconds(), Ordering::Relaxed);
-        if !LAYER_ACTIVE.load(Ordering::Relaxed) {
-            KEY_EVENT_CHANNEL
-                .try_send(KeyboardEvent::key(AUTO_MOUSE_VIRTUAL_ROW, AUTO_MOUSE_VIRTUAL_COL, true))
-                .ok();
-            LAYER_ACTIVE.store(true, Ordering::Relaxed);
+        let active_layer = ACTIVE_LAYER.load(Ordering::Relaxed);
+        let mut mode = rmk::vial_settings::mode();
+        if active_layer == LAYER_SCROLL {
+            mode = MODE_SCROLL;
+        } else if active_layer == LAYER_SNIPER {
+            mode = MODE_SNIPER;
         }
+        self.sync_auto_layer_for_motion(mode);
 
         // Extract dx/dy
         let mut dx: i16 = 0;
@@ -175,55 +175,112 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
                 _ => {}
             }
         }
+        let (dx, dy) = rmk::vial_settings::transform_axes(dx, dy);
+        let dx = rmk::vial_settings::scale_by_ball_dpi(dx as i32);
+        let dy = rmk::vial_settings::scale_by_ball_dpi(dy as i32);
 
-        let layer = ACTIVE_LAYER.load(Ordering::Relaxed);
+        match mode {
+            MODE_SCROLL => {
+                let divisor = rmk::vial_settings::scroll_sens();
+                let acc_x = SCROLL_ACCUM_X.fetch_add(dx, Ordering::Relaxed) + dx;
+                let acc_y = SCROLL_ACCUM_Y.fetch_add(dy, Ordering::Relaxed) + dy;
 
-        match layer {
-            LAYER_SCROLL => {
-                let divisor = SCROLL_DIVISOR.load(Ordering::Relaxed) as i32;
-                let acc_x = SCROLL_ACCUM_X.fetch_add(dx as i32, Ordering::Relaxed) + dx as i32;
-                let acc_y = SCROLL_ACCUM_Y.fetch_add(dy as i32, Ordering::Relaxed) + dy as i32;
-
-                let wheel = -(acc_y / divisor) as i8;
+                let wheel_direction = if rmk::vial_settings::invert_scroll() {
+                    1
+                } else {
+                    -1
+                };
+                let wheel = (wheel_direction * (acc_y / divisor)) as i8;
                 let pan = (acc_x / divisor) as i8;
 
                 if wheel != 0 || pan != 0 {
                     SCROLL_ACCUM_X.store(acc_x % divisor, Ordering::Relaxed);
                     SCROLL_ACCUM_Y.store(acc_y % divisor, Ordering::Relaxed);
 
-                    let report = MouseReport { buttons: 0, x: 0, y: 0, wheel, pan };
-                    KEYBOARD_REPORT_CHANNEL.send(Report::MouseReport(report)).await;
+                    let report = MouseReport {
+                        buttons: 0,
+                        x: 0,
+                        y: 0,
+                        wheel,
+                        pan,
+                    };
+                    KEYBOARD_REPORT_CHANNEL
+                        .send(Report::MouseReport(report))
+                        .await;
                 }
                 ProcessResult::Stop
             }
-            LAYER_SNIPER => {
-                let divisor = SNIPER_DIVISOR.load(Ordering::Relaxed) as i16;
+            MODE_SNIPER => {
+                let divisor = rmk::vial_settings::sniper_sens() as i32;
                 let slow_dx = dx / divisor;
                 let slow_dy = dy / divisor;
 
                 if slow_dx != 0 || slow_dy != 0 {
                     let report = MouseReport {
                         buttons: MOUSE_BUTTONS.load(Ordering::Relaxed),
-                        x: slow_dx.clamp(i8::MIN as i16, i8::MAX as i16) as i8,
-                        y: slow_dy.clamp(i8::MIN as i16, i8::MAX as i16) as i8,
+                        x: slow_dx.clamp(i8::MIN as i32, i8::MAX as i32) as i8,
+                        y: slow_dy.clamp(i8::MIN as i32, i8::MAX as i32) as i8,
                         wheel: 0,
                         pan: 0,
                     };
-                    KEYBOARD_REPORT_CHANNEL.send(Report::MouseReport(report)).await;
+                    KEYBOARD_REPORT_CHANNEL
+                        .send(Report::MouseReport(report))
+                        .await;
                 }
+                ProcessResult::Stop
+            }
+            MODE_TEXT => {
+                let divisor = rmk::vial_settings::text_sens();
+                let acc_x = NORMAL_ACCUM_X.fetch_add(dx, Ordering::Relaxed) + dx;
+                let acc_y = NORMAL_ACCUM_Y.fetch_add(dy, Ordering::Relaxed) + dy;
+                let mut shift_x = acc_x / divisor;
+                let mut shift_y = acc_y / divisor;
+
+                if shift_x != 0 || shift_y != 0 {
+                    NORMAL_ACCUM_X.store(acc_x % divisor, Ordering::Relaxed);
+                    NORMAL_ACCUM_Y.store(acc_y % divisor, Ordering::Relaxed);
+                }
+
+                if shift_x.abs() > shift_y.abs() {
+                    shift_y = 0;
+                    NORMAL_ACCUM_Y.store(0, Ordering::Relaxed);
+                } else if shift_y.abs() > shift_x.abs() {
+                    shift_x = 0;
+                    NORMAL_ACCUM_X.store(0, Ordering::Relaxed);
+                }
+
+                if rmk::vial_settings::invert_text() {
+                    shift_y = -shift_y;
+                }
+
+                while shift_x > 0 {
+                    tap_keyboard_key(HID_ARROW_RIGHT).await;
+                    shift_x -= 1;
+                }
+                while shift_x < 0 {
+                    tap_keyboard_key(HID_ARROW_LEFT).await;
+                    shift_x += 1;
+                }
+                while shift_y < 0 {
+                    tap_keyboard_key(HID_ARROW_UP).await;
+                    shift_y += 1;
+                }
+                while shift_y > 0 {
+                    tap_keyboard_key(HID_ARROW_DOWN).await;
+                    shift_y -= 1;
+                }
+
                 ProcessResult::Stop
             }
             _ => {
                 // Normal mode: accumulate dx/dy and send throttled report (62Hz)
                 // Include current button state so drag works correctly.
-                NORMAL_ACCUM_X.fetch_add(dx as i32, Ordering::Relaxed);
-                NORMAL_ACCUM_Y.fetch_add(dy as i32, Ordering::Relaxed);
+                let acc_x = NORMAL_ACCUM_X.fetch_add(dx, Ordering::Relaxed) + dx;
+                let acc_y = NORMAL_ACCUM_Y.fetch_add(dy, Ordering::Relaxed) + dy;
 
                 let now = now_ms();
                 let last = LAST_NORMAL_REPORT_MS.load(Ordering::Relaxed);
                 if now.wrapping_sub(last) >= NORMAL_REPORT_INTERVAL_MS {
-                    let acc_x = NORMAL_ACCUM_X.load(Ordering::Relaxed);
-                    let acc_y = NORMAL_ACCUM_Y.load(Ordering::Relaxed);
                     if acc_x != 0 || acc_y != 0 {
                         NORMAL_ACCUM_X.store(0, Ordering::Relaxed);
                         NORMAL_ACCUM_Y.store(0, Ordering::Relaxed);
@@ -236,7 +293,9 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
                             wheel: 0,
                             pan: 0,
                         };
-                        KEYBOARD_REPORT_CHANNEL.send(Report::MouseReport(report)).await;
+                        KEYBOARD_REPORT_CHANNEL
+                            .send(Report::MouseReport(report))
+                            .await;
                     }
                 }
                 ProcessResult::Stop
@@ -250,30 +309,33 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
 }
 
 /// Background task: auto-mouse timeout + layer tracking + User keycode handling.
-#[embassy_executor::task]
-pub async fn auto_mouse_tick_task() {
+pub async fn auto_mouse_tick_task<
+    'a,
+    const ROW: usize,
+    const COL: usize,
+    const NUM_LAYER: usize,
+    const NUM_ENCODER: usize,
+>(
+    keymap: &'a RefCell<KeyMap<'a, ROW, COL, NUM_LAYER, NUM_ENCODER>>,
+) {
     let mut sub = defmt::unwrap!(CONTROLLER_CHANNEL.subscriber());
 
     loop {
         match select(
-            Timer::after(Duration::from_millis(100)),
+            Timer::after(Duration::from_millis(50)),
             sub.next_message_pure(),
         )
         .await
         {
             Either::First(_) => {
-                if LAYER_ACTIVE.load(Ordering::Relaxed) {
-                    let elapsed = now_deciseconds()
-                        .saturating_sub(LAST_MOTION_T.load(Ordering::Relaxed));
-                    if elapsed >= TIMEOUT_DECISECONDS {
-                        KEY_EVENT_CHANNEL
-                            .try_send(KeyboardEvent::key(
-                                AUTO_MOUSE_VIRTUAL_ROW,
-                                AUTO_MOUSE_VIRTUAL_COL,
-                                false,
-                            ))
-                            .ok();
-                        LAYER_ACTIVE.store(false, Ordering::Relaxed);
+                let active = ACTIVE_AUTO_LAYER.load(Ordering::Relaxed);
+                if active != AUTO_LAYER_NONE {
+                    let elapsed = now_ms().wrapping_sub(LAST_MOTION_T.load(Ordering::Relaxed));
+                    if elapsed >= AUTO_LAYER_IDLE_MS {
+                        let previous = ACTIVE_AUTO_LAYER.swap(AUTO_LAYER_NONE, Ordering::Relaxed);
+                        if previous != AUTO_LAYER_NONE {
+                            keymap.borrow_mut().deactivate_layer(previous);
+                        }
                         SCROLL_ACCUM_X.store(0, Ordering::Relaxed);
                         SCROLL_ACCUM_Y.store(0, Ordering::Relaxed);
                         NORMAL_ACCUM_X.store(0, Ordering::Relaxed);
@@ -309,14 +371,13 @@ pub async fn auto_mouse_tick_task() {
 
                             // Handle User keycodes for trackball settings
                             let id = match kc {
-                                KeyCode::User8 => Some(8u8),
-                                KeyCode::User9 => Some(9),
                                 KeyCode::User10 => Some(10),
                                 KeyCode::User11 => Some(11),
+                                KeyCode::User12 => Some(12),
                                 _ => None,
                             };
                             if let Some(id) = id {
-                                handle_user_keycode(id, true);
+                                handle_user_keycode(id, key_event.is_pressed());
                             }
                         }
                     }

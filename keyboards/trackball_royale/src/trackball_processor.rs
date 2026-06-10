@@ -7,10 +7,10 @@
 /// - Layer 3 (Adjust): divisor adjustment keys
 ///
 /// ## Runtime settings via User keycodes (Adjust layer):
-/// - User8  = Scroll divisor +1  (slower scroll)
-/// - User9  = Scroll divisor -1  (faster scroll)
-/// - User10 = Sniper divisor +1  (slower sniper)
-/// - User11 = Sniper divisor -1  (faster sniper)
+/// - User10 = Scroll divisor +1  (slower scroll)
+/// - User11 = Scroll divisor -1  (faster scroll)
+/// - User12 = Sniper divisor +1  (slower sniper)
+/// - User13 = Sniper divisor -1  (faster sniper)
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
@@ -27,12 +27,12 @@ use embassy_time::Instant;
 const LAYER_SCROLL: u8 = 1;
 const LAYER_SNIPER: u8 = 2;
 
-// Default scroll divisor (higher = slower). Adjust with User8/User9 in Adjust layer.
+// Default scroll divisor (higher = slower). Adjust with User10/User11 in Adjust layer.
 const SCROLL_DIVISOR_DEFAULT: u32 = 5;
 const SCROLL_DIVISOR_MIN: u32 = 1;
 const SCROLL_DIVISOR_MAX: u32 = 32;
 
-// Default sniper divisor. Adjust with User10/User11 in Adjust layer.
+// Default sniper divisor. Adjust with User12/User13 in Adjust layer.
 const SNIPER_DIVISOR_DEFAULT: u32 = 4;
 const SNIPER_DIVISOR_MIN: u32 = 1;
 const SNIPER_DIVISOR_MAX: u32 = 16;
@@ -81,25 +81,25 @@ fn now_ms() -> u32 {
 }
 
 /// Handle User keycodes for runtime divisor adjustment.
-/// User0-User7 are reserved for BLE in RMK; use User8-User11 here.
+/// User0-User9 are reserved for BLE in RMK; use User10-User13 here.
 pub fn handle_user_keycode(keycode_idx: u8) {
     match keycode_idx {
-        8 => {
+        10 => {
             let v = (SCROLL_DIVISOR.load(Ordering::Relaxed) + 1).min(SCROLL_DIVISOR_MAX);
             SCROLL_DIVISOR.store(v, Ordering::Relaxed);
             defmt::info!("Scroll divisor: {}", v);
         }
-        9 => {
+        11 => {
             let v = SCROLL_DIVISOR.load(Ordering::Relaxed).saturating_sub(1).max(SCROLL_DIVISOR_MIN);
             SCROLL_DIVISOR.store(v, Ordering::Relaxed);
             defmt::info!("Scroll divisor: {}", v);
         }
-        10 => {
+        12 => {
             let v = (SNIPER_DIVISOR.load(Ordering::Relaxed) + 1).min(SNIPER_DIVISOR_MAX);
             SNIPER_DIVISOR.store(v, Ordering::Relaxed);
             defmt::info!("Sniper divisor: {}", v);
         }
-        11 => {
+        13 => {
             let v = SNIPER_DIVISOR.load(Ordering::Relaxed).saturating_sub(1).max(SNIPER_DIVISOR_MIN);
             SNIPER_DIVISOR.store(v, Ordering::Relaxed);
             defmt::info!("Sniper divisor: {}", v);
@@ -270,10 +270,10 @@ pub async fn trackball_tick_task() {
 
                             // Handle User keycodes for divisor adjustment
                             let id: Option<u8> = match kc {
-                                KeyCode::User8  => Some(8),
-                                KeyCode::User9  => Some(9),
                                 KeyCode::User10 => Some(10),
                                 KeyCode::User11 => Some(11),
+                                KeyCode::User12 => Some(12),
+                                KeyCode::User13 => Some(13),
                                 _ => None,
                             };
                             if let Some(id) = id {

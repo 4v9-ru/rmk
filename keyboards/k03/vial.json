@@ -24,6 +24,16 @@
             "shortName": "BT2"
         },
         {
+            "name": "BT3",
+            "title": "Bluetooth Profile 3",
+            "shortName": "BT3"
+        },
+        {
+            "name": "BT4",
+            "title": "Bluetooth Profile 4",
+            "shortName": "BT4"
+        },
+        {
             "name": "BT_NEXT",
             "title": "Next BT Profile",
             "shortName": "BT\nNext"
@@ -42,6 +52,11 @@
             "name": "BT_TOG",
             "title": "Toggle BT connection",
             "shortName": "BT\nTog"
+        },
+        {
+            "name": "BT_PEER",
+            "title": "Clear split peer",
+            "shortName": "Peer\nClr"
         }
     ],
     "layouts": {

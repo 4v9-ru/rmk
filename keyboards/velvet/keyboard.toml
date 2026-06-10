@@ -53,7 +53,7 @@ _  _     SHIFTED(Kc8)  SHIFTED(Semicolon)  Slash  SHIFTED(Kc4)  SHIFTED(Kc2)  SH
 [[layer]]
 name = "Adjust"
 keys = """
-Bootloader  _  F1  F2  F3  F4  User0  User1  User2  User3  User4  User5
+Bootloader  _  F1  F2  F3  F4  User0  User1  User2  User5  User6  User7
 _   _  F5  F6  F7  F8  OutputBluetooth  AudioVolDown  AudioMute  AudioVolUp  _  _
 _   _  F9  F10  F11  F12  OutputUsb  MediaPrevTrack  MediaPlayPause  MediaNextTrack  _  _
         _  _  _  _  _  _  _  _  _  _
@@ -93,6 +93,10 @@ col_pins = ["P0_24", "P0_09", "P0_10", "P1_11", "P1_10", "P0_03"]
 
 [rmk]
 split_peripherals_num = 1
+combo_max_num = 32
+morse_max_num = 32
+macro_space_size = 2048
+ble_profiles_num = 5
 
 [storage]
 clear_storage = false

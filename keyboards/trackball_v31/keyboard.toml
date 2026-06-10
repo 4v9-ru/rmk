@@ -22,8 +22,8 @@ layers = 4
 [[layer]]
 name = "Mouse"
 keys = """
-MouseBtn1  User12
-User0      User3
+MouseBtn1  User14
+User0      User5
 """
 
 [[layer]]
@@ -43,8 +43,8 @@ _  _
 [[layer]]
 name = "Adjust"
 keys = """
-User5   User6
-User8   User9
+User7   User8
+User10  User11
 """
 
 [ble]
@@ -75,6 +75,12 @@ invert_y = false
 
 [storage]
 clear_storage = true
+
+[rmk]
+combo_max_num = 32
+morse_max_num = 32
+macro_space_size = 2048
+ble_profiles_num = 5
 
 [workspace]
 members = ["."]

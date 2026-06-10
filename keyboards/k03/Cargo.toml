@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 embedded-storage = "0.3"
-rmk = { version = "0.8", features = [
+rmk = { path = "../../common/rmk-0.8.2-eh", features = [
     "nrf52840_ble",
     "split",
     "async_matrix",

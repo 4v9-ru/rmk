@@ -62,9 +62,9 @@ encoders = [["AudioVolUp","AudioVolDown"],["AudioVolUp","AudioVolDown"]]
 [[layer]]
 name = "Adjust"
 # From ergohaven-zmk imperial44.keymap adj layer
-# User0=BT profile 0, User1=BT profile 1, User2=BT profile 2, User3=CLR BT, User4=NEXT BT, User5=USB output
+# User0..User4=BT profiles 0..4, User5=NEXT BT, User6=PREV BT, User7=CLR BT, User8=BT toggle
 keys = """
-Bootloader  _  F1  F2  F3  F4  User0  User1  User2  User3  User4  User5
+Bootloader  _  F1  F2  F3  F4  User0  User1  User2  User5  User6  User7
 _  _  F5  F6  F7  F8  OutputBluetooth  AudioVolDown  AudioMute  AudioVolUp  _  _
 _  _  F9  F10  F11  F12  OutputUsb  MediaPrevTrack  MediaPlayPause  MediaNextTrack  _  _
                     _  _  _  _  _  _
@@ -118,6 +118,10 @@ internal_pullup = true
 
 [rmk]
 split_peripherals_num = 1
+combo_max_num = 32
+morse_max_num = 32
+macro_space_size = 2048
+ble_profiles_num = 5
 
 [storage]
 clear_storage = false

@@ -67,11 +67,11 @@ encoders = [["AudioVolUp","AudioVolDown"],["AudioVolUp","AudioVolDown"],["AudioV
 [[layer]]
 name = "Adjust"
 # Matches ergohaven-zmk k03.keymap adj layer
-# User0=BT0(BT_SEL0), User1=BT1(BT_SEL1), User2=BT2(BT_SEL2), User3=CLR_BT, User4=NEXT_BT
-# These match the customKeycodes in vial.json (0x7E00-0x7E04)
+# User0..User4=BT profiles 0..4, User5=NEXT BT, User6=PREV BT, User7=CLR BT, User8=BT toggle
+# These match the customKeycodes in vial.json.
 # OutputBluetooth/OutputUsb: switch output mode
 keys = """
-_             _        _           _          _          _           User0  User1  User2  _  User6  User5
+_             _        _           _          _          _           User0  User1  User2  _  User8  User7
 _             _        _           _          _          _           _      _      _      _      _      _
 _             _        _           _          _          _           OutputBluetooth  AudioVolDown  AudioMute  AudioVolUp  _  _
 _             _        _           _          _          _  OutputUsb  _  _  MediaPrevTrack  MediaPlayPause  MediaNextTrack  _  _
@@ -155,6 +155,10 @@ internal_pullup = true
 
 [rmk]
 split_peripherals_num = 1
+combo_max_num = 32
+morse_max_num = 32
+macro_space_size = 2048
+ble_profiles_num = 5
 
 [storage]
 clear_storage = false

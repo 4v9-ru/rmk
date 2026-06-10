@@ -2,21 +2,21 @@
 ///
 /// Mode switching handled entirely here:
 /// - MouseBtn1 (RMK)  → normal click + cursor
-/// - User12 (hold)    → Sniper mode (slow cursor)
-/// - User12 (tap)     → MB2 click (right-click)
-/// - MB1 + User12 hold → Scroll mode (trackball = wheel)
-/// - MB1 + User12 tap  → MB3 click (middle button)
-/// - MB1 + User12 double-tap → Adjust mode (BT controls)
+/// - User14 (hold)    → Sniper mode (slow cursor)
+/// - User14 (tap)     → MB2 click (right-click)
+/// - MB1 + User14 hold → Scroll mode (trackball = wheel)
+/// - MB1 + User14 tap  → MB3 click (middle button)
+/// - MB1 + User14 double-tap → Adjust mode (BT controls)
 ///
 /// In Adjust mode:
 /// - MB1 tap → BT0 (select profile 0)  → handled as User0 by RMK
-/// - User12 tap → BT Next              → handled as User3 by RMK
+/// - User14 tap → BT Next              → handled as User5 by RMK
 /// - Both buttons combo → exit Adjust mode (back to Base)
 ///
 /// ZMK equivalent: adj_td tap-dance + combos on layers 0-3
 ///
 /// ## Runtime settings via User keycodes:
-/// - User8-11 = scroll/sniper divisor adjustment
+/// - User10-13 = scroll/sniper divisor adjustment
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
@@ -209,7 +209,7 @@ async fn send_mb3_click() {
 ///
 /// In Adjust mode:
 ///   - MB1 tap → User0 action (BT0) — already in keyboard.toml Adjust layer
-///   - User12 tap → User3 action (BT Next) — already in keyboard.toml
+///   - User14 tap -> User5 action (BT Next) - already in keyboard.toml
 ///   - Both buttons combo → exit Adjust (back to normal)
 ///
 /// Note: Adjust mode uses software flag, not RMK layer switch (since
@@ -323,7 +323,7 @@ pub async fn trackball_tick_task() {
                                         }
                                     }
                                 }
-                                KeyCode::User12 => {
+                                KeyCode::User14 => {
                                     mb2_held = !mb2_held;
 
                                     if mb2_held {
@@ -371,10 +371,10 @@ pub async fn trackball_tick_task() {
                                             }
                                             defmt::info!("Combo: Scroll OFF");
                                         } else if in_adjust {
-                                            // Adjust: User12 tap → BT Next (User3) via virtual key (0,3)
+                                            // Adjust: User14 tap -> BT Next (User5) via virtual key (1,1)
                                             let held = now.wrapping_sub(mb2_press_time);
                                             if held < COMBO_TAP_MS {
-                                                defmt::info!("Adjust: BT Next (User3)");
+                                                defmt::info!("Adjust: BT Next (User5)");
                                                 send_virtual_key(1, 1).await;
                                             }
                                         } else {
@@ -387,22 +387,22 @@ pub async fn trackball_tick_task() {
                                         }
                                     }
                                 }
-                                KeyCode::User0 | KeyCode::User3 | KeyCode::User5 | KeyCode::User6 => {
+                                KeyCode::User0 | KeyCode::User5 | KeyCode::User7 | KeyCode::User8 => {
                                     // BT actions — pass through (handled by RMK natively)
                                 }
-                                KeyCode::User8 => {
+                                KeyCode::User10 => {
                                     let v = (SCROLL_DIVISOR.load(Ordering::Relaxed) + 1).min(SCROLL_DIVISOR_MAX);
                                     SCROLL_DIVISOR.store(v, Ordering::Relaxed);
                                 }
-                                KeyCode::User9 => {
+                                KeyCode::User11 => {
                                     let v = SCROLL_DIVISOR.load(Ordering::Relaxed).saturating_sub(1).max(SCROLL_DIVISOR_MIN);
                                     SCROLL_DIVISOR.store(v, Ordering::Relaxed);
                                 }
-                                KeyCode::User10 => {
+                                KeyCode::User12 => {
                                     let v = (SNIPER_DIVISOR.load(Ordering::Relaxed) + 1).min(SNIPER_DIVISOR_MAX);
                                     SNIPER_DIVISOR.store(v, Ordering::Relaxed);
                                 }
-                                KeyCode::User11 => {
+                                KeyCode::User13 => {
                                     let v = SNIPER_DIVISOR.load(Ordering::Relaxed).saturating_sub(1).max(SNIPER_DIVISOR_MIN);
                                     SNIPER_DIVISOR.store(v, Ordering::Relaxed);
                                 }

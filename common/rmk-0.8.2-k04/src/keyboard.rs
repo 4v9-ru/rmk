@@ -81,6 +81,12 @@ const K04_USER_BT_OUTPUT: u8 = 37;
 const K04_USER_USB_OUTPUT: u8 = 38;
 const K04_USER_BATTERY_LEVEL: u8 = 39;
 const K04_USER_BT_CLEAR_PEER: u8 = 40;
+const K04_USER_MT_LALT_LPAREN: u8 = 41;
+const K04_USER_MT_LCTRL_RPAREN: u8 = 42;
+const K04_USER_MT_RCTRL_LBRACE: u8 = 43;
+const K04_USER_MT_RALT_RBRACE: u8 = 44;
+const K04_USER_MT_RGUI_EXCLAIM: u8 = 45;
+const K04_USER_MT_RGUI_BT_CLEAR: u8 = 46;
 const K04_RIGHT_SPLIT_PERIPHERAL_ID: usize = 0;
 const K04_MODE_TAPPING_TERM_MS: u32 = 200;
 const K04_LANG_EN: u8 = 0;
@@ -458,8 +464,10 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
     }
 
     async fn process_key_action(&mut self, key_action: &KeyAction, event: KeyboardEvent, is_combo: bool) {
+        let key_action = Self::k04_expand_custom_tap_hold(*key_action);
+
         // First, make the decision for current key and held keys
-        let (decision_for_current_key, decisions) = self.make_decisions_for_keys(key_action, event);
+        let (decision_for_current_key, decisions) = self.make_decisions_for_keys(&key_action, event);
 
         // Fire held keys if needed
         let (keyboard_state_updated, updated_decision_for_cur_key) =
@@ -471,23 +479,23 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
                 debug!("Clean buffer, then process current key normally");
                 let key_action = if keyboard_state_updated && !is_combo {
                     // The key_action needs to be updated due to the morse key might be triggered
-                    &self.keymap.borrow_mut().get_action_with_layer_cache(event)
+                    Self::k04_expand_custom_tap_hold(self.keymap.borrow_mut().get_action_with_layer_cache(event))
                 } else {
                     key_action
                 };
-                self.process_key_action_inner(key_action, event).await
+                self.process_key_action_inner(&key_action, event).await
             }
             KeyBehaviorDecision::Buffer => {
                 debug!("Current key is buffered");
                 let press_time = Instant::now();
                 let timeout_time = if key_action.is_morse() {
-                    press_time + Self::morse_timeout(&self.keymap.borrow(), key_action, true)
+                    press_time + Self::morse_timeout(&self.keymap.borrow(), &key_action, true)
                 } else {
                     press_time
                 };
                 self.held_buffer.push(HeldKey::new(
                     event,
-                    *key_action,
+                    key_action,
                     KeyState::Pressed(MorsePattern::default()),
                     press_time,
                     timeout_time,
@@ -498,27 +506,61 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
                 // Process current key normally
                 let key_action = if keyboard_state_updated && !is_combo {
                     // The key_action needs to be updated due to the morse key might be triggered
-                    &self.keymap.borrow_mut().get_action_with_layer_cache(event)
+                    Self::k04_expand_custom_tap_hold(self.keymap.borrow_mut().get_action_with_layer_cache(event))
                 } else {
                     key_action
                 };
-                self.process_key_action_inner(key_action, event).await
+                self.process_key_action_inner(&key_action, event).await
             }
             KeyBehaviorDecision::FlowTap => {
-                let action = Self::action_from_pattern(self.keymap.borrow().behavior, key_action, TAP); //tap action
+                let action = Self::action_from_pattern(self.keymap.borrow().behavior, &key_action, TAP); //tap action
                 self.process_key_action_normal(action, event).await;
                 // Push back after triggered press
                 let now = Instant::now();
-                let time_out = now + Self::morse_timeout(&self.keymap.borrow(), key_action, true);
+                let time_out = now + Self::morse_timeout(&self.keymap.borrow(), &key_action, true);
                 self.held_buffer.push(HeldKey::new(
                     event,
-                    *key_action,
+                    key_action,
                     KeyState::ProcessedButReleaseNotReportedYet(action),
                     now,
                     time_out,
                 ));
             }
         }
+    }
+
+    fn k04_expand_custom_tap_hold(key_action: KeyAction) -> KeyAction {
+        let KeyAction::Single(Action::Key(key)) = key_action else {
+            return key_action;
+        };
+        if !key.is_user() {
+            return key_action;
+        }
+
+        let id = (key as u16 - KeyCode::User0 as u16) as u8;
+        let Some((tap_key, hold_mod)) = (match id {
+            K04_USER_MT_LALT_LPAREN => Some((KeyCode::Kc9, ModifierCombination::LALT)),
+            K04_USER_MT_LCTRL_RPAREN => Some((KeyCode::Kc0, ModifierCombination::LCTRL)),
+            K04_USER_MT_RCTRL_LBRACE => Some((KeyCode::LeftBracket, ModifierCombination::RCTRL)),
+            K04_USER_MT_RALT_RBRACE => Some((KeyCode::RightBracket, ModifierCombination::RALT)),
+            K04_USER_MT_RGUI_EXCLAIM => Some((KeyCode::Kc1, ModifierCombination::RGUI)),
+            K04_USER_MT_RGUI_BT_CLEAR => {
+                return KeyAction::TapHold(
+                    Action::Key(KeyCode::User26),
+                    Action::Modifier(ModifierCombination::RGUI),
+                    Default::default(),
+                );
+            }
+            _ => None,
+        }) else {
+            return key_action;
+        };
+
+        KeyAction::TapHold(
+            Action::KeyWithModifier(tap_key, ModifierCombination::LSHIFT),
+            Action::Modifier(hold_mod),
+            Default::default(),
+        )
     }
 
     /// Fire held keys according to their decisions.
@@ -578,7 +620,9 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
                 }
                 HeldKeyDecision::PermissiveHold | HeldKeyDecision::HoldOnOtherKeyPress => {
                     if let Some(mut held_key) = self.held_buffer.remove_if(|k| k.event.pos == pos) {
-                        let action = self.keymap.borrow_mut().get_action_with_layer_cache(held_key.event);
+                        let action = Self::k04_expand_custom_tap_hold(
+                            self.keymap.borrow_mut().get_action_with_layer_cache(held_key.event),
+                        );
 
                         if action.is_morse() {
                             // Permissive hold of held key is triggered
@@ -620,7 +664,9 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
                     // Releasing the current key, will always be tapping, because timeout isn't here
                     if let Some(mut held_key) = self.held_buffer.remove_if(|k| k.event.pos == pos) {
                         let key_action = if keyboard_state_updated {
-                            self.keymap.borrow_mut().get_action_with_layer_cache(held_key.event)
+                            Self::k04_expand_custom_tap_hold(
+                                self.keymap.borrow_mut().get_action_with_layer_cache(held_key.event),
+                            )
                         } else {
                             held_key.action
                         };
@@ -677,7 +723,9 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
                     if trigger_normal && let Some(held_key) = self.held_buffer.remove_if(|k| k.event.pos == pos) {
                         debug!("Cleaning buffered normal key");
                         let action = if keyboard_state_updated {
-                            self.keymap.borrow_mut().get_action_with_layer_cache(held_key.event)
+                            Self::k04_expand_custom_tap_hold(
+                                self.keymap.borrow_mut().get_action_with_layer_cache(held_key.event),
+                            )
                         } else {
                             held_key.action
                         };

@@ -162,10 +162,7 @@ impl<
                     let _ = futs.push(direct_pin.wait_for_low());
                 }
             }
-            let futs = pin!(futs);
-            // SAFETY: `futs` is pinned above and not moved afterwards; `as_mut_slice` only
-            // reborrows its backing storage, so the futures stay pinned in place while polled.
-            let _ = select_slice(unsafe { futs.map_unchecked_mut(|v| v.as_mut_slice()) }).await;
+            let _ = select_slice(pin!(futs.as_mut_slice())).await;
         } else {
             let mut futs: Vec<_, SIZE> = Vec::new();
             for direct_pins_row in self.direct_pins.iter_mut() {
@@ -173,10 +170,7 @@ impl<
                     let _ = futs.push(direct_pin.wait_for_high());
                 }
             }
-            let futs = pin!(futs);
-            // SAFETY: `futs` is pinned above and not moved afterwards; `as_mut_slice` only
-            // reborrows its backing storage, so the futures stay pinned in place while polled.
-            let _ = select_slice(unsafe { futs.map_unchecked_mut(|v| v.as_mut_slice()) }).await;
+            let _ = select_slice(pin!(futs.as_mut_slice())).await;
         }
         self.scan_start = Some(Instant::now());
     }

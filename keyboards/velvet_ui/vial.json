@@ -2,6 +2,10 @@
     "name": "Ergohaven Velvet UI",
     "vendorId": "0xE126",
     "productId": "0x00BF",
+    "firmware": {
+        "version": "0.1.2"
+    },
+    "firmwareVersion": "0.1.2",
     "lighting": "none",
     "matrix": {
         "rows": 11,
@@ -184,14 +188,26 @@
                 },
                 {
                     "type": "boolean",
-                    "title": "Invert scroll",
+                    "title": "Invert scroll vertical",
                     "qsid": 138,
                     "bit": 0
                 },
                 {
                     "type": "boolean",
-                    "title": "Invert text",
+                    "title": "Invert scroll horizontal",
+                    "qsid": 328,
+                    "bit": 0
+                },
+                {
+                    "type": "boolean",
+                    "title": "Invert text vertical",
                     "qsid": 148,
+                    "bit": 0
+                },
+                {
+                    "type": "boolean",
+                    "title": "Invert text horizontal",
+                    "qsid": 330,
                     "bit": 0
                 },
                 {

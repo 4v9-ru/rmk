@@ -3,7 +3,7 @@
 use strum::FromRepr;
 
 pub const VIA_PROTOCOL_VERSION: u16 = 0x0009;
-pub const VIA_FIRMWARE_VERSION: u32 = 0x0001;
+pub const VIA_FIRMWARE_VERSION: u32 = 0x00000102;
 
 pub const VIAL_PROTOCOL_VERSION: u32 = 6;
 pub const VIAL_EP_SIZE: usize = 32;

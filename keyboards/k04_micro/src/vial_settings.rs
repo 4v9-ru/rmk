@@ -11,8 +11,8 @@ pub const BALL_DPI_TABLE: [u16; 16] = [
     200, 400, 600, 800, 1000, 1200, 1400, 1600, 1800, 2000, 2200, 2400, 2600, 2800, 3000, 3200,
 ];
 
-const VERSION: u8 = 8;
-pub const SETTINGS_LEN: usize = 42;
+const VERSION: u8 = 9;
+pub const SETTINGS_LEN: usize = 43;
 pub const SETTINGS_SYNC_LEN: usize = 27;
 const SETTINGS_STORAGE_LEN: usize = 32;
 const SETTINGS_STORAGE_LEN_V3_LEGACY_31: usize = 31;
@@ -63,15 +63,21 @@ const IDX_AUTO_LAYER_TIMEOUT: usize = 38;
 const IDX_MODULE_SELECT: usize = 39;
 const IDX_LEFT_ENCODER_INTERVAL: usize = 40;
 const IDX_RIGHT_ENCODER_INTERVAL: usize = 41;
+const IDX_AXIS_FLAGS: usize = 42;
 
-const FLAG_LEFT_INVERT_SCROLL: u8 = 1 << 0;
-const FLAG_RIGHT_INVERT_SCROLL: u8 = 1 << 1;
-const FLAG_LEFT_INVERT_TEXT: u8 = 1 << 2;
-const FLAG_RIGHT_INVERT_TEXT: u8 = 1 << 3;
+const FLAG_LEFT_INVERT_SCROLL_Y: u8 = 1 << 0;
+const FLAG_RIGHT_INVERT_SCROLL_Y: u8 = 1 << 1;
+const FLAG_LEFT_INVERT_TEXT_Y: u8 = 1 << 2;
+const FLAG_RIGHT_INVERT_TEXT_Y: u8 = 1 << 3;
 const FLAG_LEFT_ACCELERATION: u8 = 1 << 4;
 const FLAG_RIGHT_ACCELERATION: u8 = 1 << 5;
 const FLAG_LEFT_STICKY: u8 = 1 << 6;
 const FLAG_RIGHT_STICKY: u8 = 1 << 7;
+
+const AXIS_FLAG_LEFT_INVERT_SCROLL_X: u8 = 1 << 0;
+const AXIS_FLAG_RIGHT_INVERT_SCROLL_X: u8 = 1 << 1;
+const AXIS_FLAG_LEFT_INVERT_TEXT_X: u8 = 1 << 2;
+const AXIS_FLAG_RIGHT_INVERT_TEXT_X: u8 = 1 << 3;
 
 const AUTO_FLAG_TOUCH_GESTURES_LEFT: u8 = 1 << 4;
 const AUTO_FLAG_TOUCH_GESTURES_RIGHT: u8 = 1 << 5;
@@ -461,17 +467,31 @@ pub fn sens(side: ModuleSide, mode: PointingMode) -> i16 {
     i16::from(byte(idx).max(1))
 }
 
-pub fn invert_scroll(side: ModuleSide) -> bool {
-    flag(match side {
-        ModuleSide::Left => FLAG_LEFT_INVERT_SCROLL,
-        ModuleSide::Right => FLAG_RIGHT_INVERT_SCROLL,
+pub fn invert_scroll_x(side: ModuleSide) -> bool {
+    axis_flag(match side {
+        ModuleSide::Left => AXIS_FLAG_LEFT_INVERT_SCROLL_X,
+        ModuleSide::Right => AXIS_FLAG_RIGHT_INVERT_SCROLL_X,
     })
 }
 
-pub fn invert_text(side: ModuleSide) -> bool {
+pub fn invert_scroll_y(side: ModuleSide) -> bool {
     flag(match side {
-        ModuleSide::Left => FLAG_LEFT_INVERT_TEXT,
-        ModuleSide::Right => FLAG_RIGHT_INVERT_TEXT,
+        ModuleSide::Left => FLAG_LEFT_INVERT_SCROLL_Y,
+        ModuleSide::Right => FLAG_RIGHT_INVERT_SCROLL_Y,
+    })
+}
+
+pub fn invert_text_x(side: ModuleSide) -> bool {
+    axis_flag(match side {
+        ModuleSide::Left => AXIS_FLAG_LEFT_INVERT_TEXT_X,
+        ModuleSide::Right => AXIS_FLAG_RIGHT_INVERT_TEXT_X,
+    })
+}
+
+pub fn invert_text_y(side: ModuleSide) -> bool {
+    flag(match side {
+        ModuleSide::Left => FLAG_LEFT_INVERT_TEXT_Y,
+        ModuleSide::Right => FLAG_RIGHT_INVERT_TEXT_Y,
     })
 }
 
@@ -651,6 +671,10 @@ fn flag(mask: u8) -> bool {
     (byte(IDX_FLAGS) & mask) != 0
 }
 
+fn axis_flag(mask: u8) -> bool {
+    (byte(IDX_AXIS_FLAGS) & mask) != 0
+}
+
 fn set_flag(mask: u8, enabled: bool) {
     let mut flags = byte(IDX_FLAGS);
     if enabled {
@@ -659,6 +683,16 @@ fn set_flag(mask: u8, enabled: bool) {
         flags &= !mask;
     }
     set_byte(IDX_FLAGS, flags);
+}
+
+fn set_axis_flag(mask: u8, enabled: bool) {
+    let mut flags = byte(IDX_AXIS_FLAGS);
+    if enabled {
+        flags |= mask;
+    } else {
+        flags &= !mask;
+    }
+    set_byte(IDX_AXIS_FLAGS, flags);
 }
 
 fn get_setting(qsid: u16, out: &mut [u8]) -> Option<usize> {
@@ -674,7 +708,7 @@ fn get_setting(qsid: u16, out: &mut [u8]) -> Option<usize> {
 
 fn qsid_width(qsid: u16) -> Option<usize> {
     match qsid {
-        120..=152 | 300..=315 | 317..=326 => Some(1),
+        120..=152 | 300..=315 | 317..=330 => Some(1),
         316 => Some(2),
         _ => None,
     }
@@ -702,9 +736,9 @@ fn set_setting(qsid: u16, data: &[u8]) -> bool {
         133 => set_byte(IDX_RIGHT_TOUCH_AXIS, value.min(3)),
         134 => set_byte(IDX_LEFT_MODE, value.min(3)),
         135 => set_byte(IDX_RIGHT_MODE, value.min(3)),
-        136 => set_flag(FLAG_LEFT_INVERT_SCROLL, value != 0),
+        136 => set_flag(FLAG_LEFT_INVERT_SCROLL_Y, value != 0),
         137 => set_flag(FLAG_LEFT_ACCELERATION, value != 0),
-        138 => set_flag(FLAG_RIGHT_INVERT_SCROLL, value != 0),
+        138 => set_flag(FLAG_RIGHT_INVERT_SCROLL_Y, value != 0),
         139 => set_flag(FLAG_RIGHT_ACCELERATION, value != 0),
         140 => set_flag(FLAG_LEFT_STICKY, value != 0),
         141 => set_flag(FLAG_RIGHT_STICKY, value != 0),
@@ -713,8 +747,8 @@ fn set_setting(qsid: u16, data: &[u8]) -> bool {
         144 => set_auto_flag(1, value != 0),
         145 => set_auto_flag(2, value != 0),
         146 => set_auto_flag(3, value != 0),
-        147 => set_flag(FLAG_LEFT_INVERT_TEXT, value != 0),
-        148 => set_flag(FLAG_RIGHT_INVERT_TEXT, value != 0),
+        147 => set_flag(FLAG_LEFT_INVERT_TEXT_Y, value != 0),
+        148 => set_flag(FLAG_RIGHT_INVERT_TEXT_Y, value != 0),
         149 => set_module_selection(ModuleSide::Left, value),
         150 => set_module_selection(ModuleSide::Right, value),
         151 => set_touch_gestures_enabled(ModuleSide::Left, value != 0),
@@ -727,6 +761,10 @@ fn set_setting(qsid: u16, data: &[u8]) -> bool {
         324 => set_byte(IDX_AUTO_LAYER_TIMEOUT, value.min(5)),
         325 => set_byte(IDX_LEFT_ENCODER_INTERVAL, value.min(9)),
         326 => set_byte(IDX_RIGHT_ENCODER_INTERVAL, value.min(9)),
+        327 => set_axis_flag(AXIS_FLAG_LEFT_INVERT_SCROLL_X, value != 0),
+        328 => set_axis_flag(AXIS_FLAG_RIGHT_INVERT_SCROLL_X, value != 0),
+        329 => set_axis_flag(AXIS_FLAG_LEFT_INVERT_TEXT_X, value != 0),
+        330 => set_axis_flag(AXIS_FLAG_RIGHT_INVERT_TEXT_X, value != 0),
         _ => return false,
     }
     publish_settings_snapshot();
@@ -752,9 +790,9 @@ fn qsid_value(qsid: u16) -> Option<u8> {
         133 => byte(IDX_RIGHT_TOUCH_AXIS),
         134 => byte(IDX_LEFT_MODE),
         135 => byte(IDX_RIGHT_MODE),
-        136 => flag(FLAG_LEFT_INVERT_SCROLL) as u8,
+        136 => flag(FLAG_LEFT_INVERT_SCROLL_Y) as u8,
         137 => flag(FLAG_LEFT_ACCELERATION) as u8,
-        138 => flag(FLAG_RIGHT_INVERT_SCROLL) as u8,
+        138 => flag(FLAG_RIGHT_INVERT_SCROLL_Y) as u8,
         139 => flag(FLAG_RIGHT_ACCELERATION) as u8,
         140 => flag(FLAG_LEFT_STICKY) as u8,
         141 => flag(FLAG_RIGHT_STICKY) as u8,
@@ -763,8 +801,8 @@ fn qsid_value(qsid: u16) -> Option<u8> {
         144 => auto_flag(1) as u8,
         145 => auto_flag(2) as u8,
         146 => auto_flag(3) as u8,
-        147 => flag(FLAG_LEFT_INVERT_TEXT) as u8,
-        148 => flag(FLAG_RIGHT_INVERT_TEXT) as u8,
+        147 => flag(FLAG_LEFT_INVERT_TEXT_Y) as u8,
+        148 => flag(FLAG_RIGHT_INVERT_TEXT_Y) as u8,
         149 => module_selection_value(ModuleSide::Left),
         150 => module_selection_value(ModuleSide::Right),
         151 => touch_gestures_enabled(ModuleSide::Left) as u8,
@@ -777,6 +815,10 @@ fn qsid_value(qsid: u16) -> Option<u8> {
         324 => byte(IDX_AUTO_LAYER_TIMEOUT).min(5),
         325 => byte(IDX_LEFT_ENCODER_INTERVAL).min(9),
         326 => byte(IDX_RIGHT_ENCODER_INTERVAL).min(9),
+        327 => axis_flag(AXIS_FLAG_LEFT_INVERT_SCROLL_X) as u8,
+        328 => axis_flag(AXIS_FLAG_RIGHT_INVERT_SCROLL_X) as u8,
+        329 => axis_flag(AXIS_FLAG_LEFT_INVERT_TEXT_X) as u8,
+        330 => axis_flag(AXIS_FLAG_RIGHT_INVERT_TEXT_X) as u8,
         _ => return None,
     })
 }
@@ -820,7 +862,8 @@ fn serialize() -> VialDeviceSettingsData {
     data.data[29] = sleep_timeout_index() | ((byte(IDX_LEFT_ENCODER_INTERVAL).min(9) & 0x0f) << 4);
     data.data[30] = byte(IDX_AUTO_LAYER_TIMEOUT).min(5)
         | ((byte(IDX_RIGHT_ENCODER_INTERVAL).min(9) & 0x0f) << 4);
-    data.data[31] = byte(IDX_MODULE_SELECT) & MODULE_SELECT_MASK;
+    data.data[31] =
+        (byte(IDX_MODULE_SELECT) & MODULE_SELECT_MASK) | ((byte(IDX_AXIS_FLAGS) & 0x0f) << 4);
     data
 }
 
@@ -844,6 +887,7 @@ fn deserialize(data: &[u8]) {
     let version = data[0];
     if version != VERSION
         && version != 7
+        && version != 8
         && version != 6
         && version != 5
         && version != 4
@@ -871,7 +915,12 @@ fn deserialize(data: &[u8]) {
     SETTINGS[IDX_RIGHT_SNIPER_SENS].store(data[9].max(1), Ordering::Relaxed);
     SETTINGS[IDX_RIGHT_TEXT_SENS].store(data[10].max(1), Ordering::Relaxed);
     SETTINGS[IDX_FLAGS].store(data[11], Ordering::Relaxed);
-    let auto_flags = if version == VERSION || version == 7 {
+    if version == VERSION && data.len() == SETTINGS_STORAGE_LEN {
+        SETTINGS[IDX_AXIS_FLAGS].store((data[31] >> 4) & 0x0f, Ordering::Relaxed);
+    } else {
+        SETTINGS[IDX_AXIS_FLAGS].store(migrate_axis_flags(data[11]), Ordering::Relaxed);
+    }
+    let auto_flags = if version == VERSION || version == 8 || version == 7 {
         data[12]
     } else {
         data[12] & !AUTO_FLAG_TOUCH_GESTURES_MASK
@@ -891,17 +940,19 @@ fn deserialize(data: &[u8]) {
     }
     if data.len() >= SETTINGS_STORAGE_LEN_V3_LEGACY_30 {
         SETTINGS[IDX_SLEEP_TIMEOUT].store((data[29] & 0x0f).min(9), Ordering::Relaxed);
-        if version == VERSION {
+        if version == VERSION || version == 8 {
             SETTINGS[IDX_LEFT_ENCODER_INTERVAL].store((data[29] >> 4).min(9), Ordering::Relaxed);
         }
     }
     if data.len() >= SETTINGS_STORAGE_LEN_V3_LEGACY_31 {
         SETTINGS[IDX_AUTO_LAYER_TIMEOUT].store((data[30] & 0x0f).min(5), Ordering::Relaxed);
-        if version == VERSION {
+        if version == VERSION || version == 8 {
             SETTINGS[IDX_RIGHT_ENCODER_INTERVAL].store((data[30] >> 4).min(9), Ordering::Relaxed);
         }
     }
-    if data.len() == SETTINGS_STORAGE_LEN && (version == VERSION || version == 6 || version == 5) {
+    if data.len() == SETTINGS_STORAGE_LEN
+        && (version == VERSION || version == 8 || version == 6 || version == 5)
+    {
         SETTINGS[IDX_MODULE_SELECT].store(data[31] & MODULE_SELECT_MASK, Ordering::Relaxed);
     } else if data.len() == SETTINGS_STORAGE_LEN && version == 4 {
         SETTINGS[IDX_MODULE_SELECT].store(v4_module_flags_to_select(data[31]), Ordering::Relaxed);
@@ -916,6 +967,23 @@ fn deserialize(data: &[u8]) {
         SETTINGS_CHANGED.signal(());
     }
     publish_settings_snapshot();
+}
+
+fn migrate_axis_flags(flags: u8) -> u8 {
+    let mut axis_flags = 0;
+    if (flags & FLAG_LEFT_INVERT_SCROLL_Y) != 0 {
+        axis_flags |= AXIS_FLAG_LEFT_INVERT_SCROLL_X;
+    }
+    if (flags & FLAG_RIGHT_INVERT_SCROLL_Y) != 0 {
+        axis_flags |= AXIS_FLAG_RIGHT_INVERT_SCROLL_X;
+    }
+    if (flags & FLAG_LEFT_INVERT_TEXT_Y) != 0 {
+        axis_flags |= AXIS_FLAG_LEFT_INVERT_TEXT_X;
+    }
+    if (flags & FLAG_RIGHT_INVERT_TEXT_Y) != 0 {
+        axis_flags |= AXIS_FLAG_RIGHT_INVERT_TEXT_X;
+    }
+    axis_flags
 }
 
 fn module_selection_value(side: ModuleSide) -> u8 {
@@ -1220,9 +1288,9 @@ fn palette(index: u8) -> Rgb {
     }
 }
 
-const SETTING_KEYS: [u16; 60] = [
+const SETTING_KEYS: [u16; 64] = [
     120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138,
     139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 300, 301, 302, 303, 304,
     305, 306, 307, 308, 309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 319, 320, 321, 322, 323,
-    324, 325, 326,
+    324, 325, 326, 327, 328, 329, 330,
 ];

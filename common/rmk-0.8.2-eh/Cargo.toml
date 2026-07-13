@@ -303,6 +303,7 @@ version = "=0.7.1"
 
 [dependencies.rmk-types]
 version = "=0.2.2"
+path = "../rmk-types-0.2.2-k04"
 
 [dependencies.rp-pac]
 version = "7.0.0"

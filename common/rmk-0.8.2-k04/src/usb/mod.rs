@@ -114,6 +114,7 @@ pub(crate) fn new_usb_builder<'d, D: Driver<'d>>(driver: D, keyboard_config: Dev
     usb_config.manufacturer = Some(keyboard_config.manufacturer);
     usb_config.product = Some(keyboard_config.product_name);
     usb_config.serial_number = Some(keyboard_config.serial_number);
+    usb_config.device_release = keyboard_config.device_version;
     usb_config.max_power = 450;
     usb_config.supports_remote_wakeup = true;
 

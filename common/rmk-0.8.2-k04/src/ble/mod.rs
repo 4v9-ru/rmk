@@ -205,7 +205,7 @@ pub(crate) async fn run_ble<
                 vid_source: VidSource::UsbIF,
                 vendor_id: rmk_config.device_config.vid,
                 product_id: rmk_config.device_config.pid,
-                product_version: 0x0001,
+                product_version: rmk_config.device_config.device_version,
             },
         )
         .unwrap();
@@ -221,6 +221,13 @@ pub(crate) async fn run_ble<
         .set(
             &server.device_config_service.manufacturer_name,
             &heapless::String::try_from(rmk_config.device_config.manufacturer).unwrap(),
+        )
+        .unwrap();
+
+    server
+        .set(
+            &server.device_config_service.firmware_revision,
+            &heapless::String::try_from(rmk_config.device_config.firmware_version).unwrap(),
         )
         .unwrap();
 

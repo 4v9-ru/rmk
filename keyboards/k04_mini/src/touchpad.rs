@@ -17,10 +17,11 @@ use usbd_hid::descriptor::MouseReport;
 use crate::vial_settings::{
     acceleration, auto_layer, auto_layer_enabled, auto_layer_timeout_ms, claim_pointing_module,
     encoder_interval_ms, encoder_module_enabled, handle_mode_key, handle_side_mode_key,
-    invert_scroll, invert_text, kind_from_index, kind_index, orientation, pointing_mode,
-    pointing_module_claimed_by_other, pointing_module_enabled, release_pointing_module,
-    scale_touch_delta, sens, side_from_index, side_index, touch_gestures_enabled,
-    wait_pointing_module_selection_change, ModuleKind, ModuleSide, PointingMode,
+    invert_scroll_x, invert_scroll_y, invert_text_x, invert_text_y, kind_from_index, kind_index,
+    orientation, pointing_mode, pointing_module_claimed_by_other, pointing_module_enabled,
+    release_pointing_module, scale_touch_delta, sens, side_from_index, side_index,
+    touch_gestures_enabled, wait_pointing_module_selection_change, ModuleKind, ModuleSide,
+    PointingMode,
 };
 
 const IQS5XX_ADDR: u8 = 0x74;
@@ -627,9 +628,10 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
 
     async fn send_scroll_motion(&mut self, side: ModuleSide, x: i16, y: i16) {
         let divisor = i32::from(sens(side, PointingMode::Scroll));
-        let invert = if invert_scroll(side) { -1 } else { 1 };
-        self.scroll_accum_h = self.scroll_accum_h.saturating_add(i32::from(x) * invert);
-        self.scroll_accum_v = self.scroll_accum_v.saturating_add(i32::from(y) * invert);
+        let invert_x = if invert_scroll_x(side) { -1 } else { 1 };
+        let invert_y = if invert_scroll_y(side) { -1 } else { 1 };
+        self.scroll_accum_h = self.scroll_accum_h.saturating_add(i32::from(x) * invert_x);
+        self.scroll_accum_v = self.scroll_accum_v.saturating_add(i32::from(y) * invert_y);
 
         let h = pending_steps(self.scroll_accum_h, divisor);
         let v = pending_steps(self.scroll_accum_v, divisor);
@@ -641,9 +643,10 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
 
     async fn send_text_motion(&mut self, side: ModuleSide, x: i16, y: i16) {
         let divisor = i32::from(sens(side, PointingMode::Text));
-        let invert = if invert_text(side) { -1 } else { 1 };
-        self.text_accum_x = self.text_accum_x.saturating_add(i32::from(x) * invert);
-        self.text_accum_y = self.text_accum_y.saturating_add(i32::from(y) * invert);
+        let invert_x = if invert_text_x(side) { -1 } else { 1 };
+        let invert_y = if invert_text_y(side) { -1 } else { 1 };
+        self.text_accum_x = self.text_accum_x.saturating_add(i32::from(x) * invert_x);
+        self.text_accum_y = self.text_accum_y.saturating_add(i32::from(y) * invert_y);
 
         let x_steps = drain_steps(&mut self.text_accum_x, divisor).clamp(-4, 4);
         let y_steps = drain_steps(&mut self.text_accum_y, divisor).clamp(-4, 4);
@@ -837,8 +840,9 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
                         let side = side_from_index(data[5]);
                         let h = i16::from_be_bytes([data[6], data[7]]);
                         let v = i16::from_be_bytes([data[8], data[9]]);
-                        let invert = if invert_scroll(side) { -1 } else { 1 };
-                        self.send_mouse(0, 0, 0, v * invert, h * invert).await;
+                        let invert_x = if invert_scroll_x(side) { -1 } else { 1 };
+                        let invert_y = if invert_scroll_y(side) { -1 } else { 1 };
+                        self.send_mouse(0, 0, 0, v * invert_y, h * invert_x).await;
                     }
                     CUSTOM_MOTION => {
                         let side = side_from_index(data[5]);

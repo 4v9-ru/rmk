@@ -61,4 +61,6 @@ pub(crate) struct DeviceConfigrmationService {
     pub(crate) serial_number: heapless::String<20>,
     #[characteristic(uuid = "2a29", read)]
     pub(crate) manufacturer_name: heapless::String<20>,
+    #[characteristic(uuid = "2a26", read)]
+    pub(crate) firmware_revision: heapless::String<20>,
 }

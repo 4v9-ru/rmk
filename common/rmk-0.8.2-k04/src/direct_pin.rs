@@ -2,6 +2,8 @@ use embassy_time::{Instant, Timer};
 use embedded_hal;
 use embedded_hal::digital::InputPin;
 #[cfg(feature = "async_matrix")]
+use core::pin::Pin;
+#[cfg(feature = "async_matrix")]
 use {embassy_futures::select::select_slice, embedded_hal_async::digital::Wait, heapless::Vec};
 
 use crate::MatrixTrait;
@@ -126,8 +128,6 @@ impl<
 {
     #[cfg(feature = "async_matrix")]
     async fn wait_for_key(&mut self) {
-        use core::pin::pin;
-
         if let Some(start_time) = self.scan_start {
             // If no key press over 1ms, stop scanning and wait for interupt
             if start_time.elapsed().as_millis() <= 1 {
@@ -146,7 +146,7 @@ impl<
                     let _ = futs.push(direct_pin.wait_for_low());
                 }
             }
-            let _ = select_slice(pin!(futs.as_mut_slice())).await;
+            let _ = select_slice(unsafe { Pin::new_unchecked(futs.as_mut_slice()) }).await;
         } else {
             let mut futs: Vec<_, SIZE> = Vec::new();
             for direct_pins_row in self.direct_pins.iter_mut() {
@@ -154,7 +154,7 @@ impl<
                     let _ = futs.push(direct_pin.wait_for_high());
                 }
             }
-            let _ = select_slice(pin!(futs.as_mut_slice())).await;
+            let _ = select_slice(unsafe { Pin::new_unchecked(futs.as_mut_slice()) }).await;
         }
         self.scan_start = Some(Instant::now());
     }

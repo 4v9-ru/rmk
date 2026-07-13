@@ -6,7 +6,7 @@ pub const QSID_SCROLL_SENS: u16 = 128;
 pub const QSID_TEXT_SENS: u16 = 129;
 pub const QSID_BALL_AXIS: u16 = 131;
 pub const QSID_MODE: u16 = 135;
-pub const QSID_INVERT_SCROLL: u16 = 138;
+pub const QSID_INVERT_SCROLL_Y: u16 = 138;
 pub const QSID_ACCELERATION: u16 = 139;
 pub const QSID_STICKY_MODE: u16 = 141;
 pub const QSID_AUTO_LAYER_NORMAL: u16 = 142;
@@ -14,7 +14,9 @@ pub const QSID_AUTO_LAYER: u16 = 143;
 pub const QSID_AUTO_LAYER_SNIPER: u16 = 144;
 pub const QSID_AUTO_LAYER_SCROLL: u16 = 145;
 pub const QSID_AUTO_LAYER_TEXT: u16 = 146;
-pub const QSID_INVERT_TEXT: u16 = 148;
+pub const QSID_INVERT_TEXT_Y: u16 = 148;
+pub const QSID_INVERT_SCROLL_X: u16 = 328;
+pub const QSID_INVERT_TEXT_X: u16 = 330;
 
 pub const SETTING_KEYS: &[u16] = &[
     QSID_BALL_DPI,
@@ -23,7 +25,7 @@ pub const SETTING_KEYS: &[u16] = &[
     QSID_TEXT_SENS,
     QSID_BALL_AXIS,
     QSID_MODE,
-    QSID_INVERT_SCROLL,
+    QSID_INVERT_SCROLL_Y,
     QSID_ACCELERATION,
     QSID_STICKY_MODE,
     QSID_AUTO_LAYER_NORMAL,
@@ -31,7 +33,9 @@ pub const SETTING_KEYS: &[u16] = &[
     QSID_AUTO_LAYER_SNIPER,
     QSID_AUTO_LAYER_SCROLL,
     QSID_AUTO_LAYER_TEXT,
-    QSID_INVERT_TEXT,
+    QSID_INVERT_TEXT_Y,
+    QSID_INVERT_SCROLL_X,
+    QSID_INVERT_TEXT_X,
 ];
 
 const DEFAULT_BALL_DPI: u8 = 4; // 1000 CPI in the Phenom table
@@ -43,14 +47,18 @@ const DEFAULT_MODE: u8 = 0;
 const DEFAULT_AUTO_LAYER: u8 = 4;
 const DEFAULT_FLAGS: u8 = FLAG_AUTO_LAYER_NORMAL;
 
-const FLAG_INVERT_SCROLL: u8 = 1 << 0;
+const FLAG_INVERT_SCROLL_Y: u8 = 1 << 0;
 const FLAG_ACCELERATION: u8 = 1 << 1;
 const FLAG_STICKY_MODE: u8 = 1 << 2;
 const FLAG_AUTO_LAYER_NORMAL: u8 = 1 << 3;
 const FLAG_AUTO_LAYER_SNIPER: u8 = 1 << 4;
 const FLAG_AUTO_LAYER_SCROLL: u8 = 1 << 5;
 const FLAG_AUTO_LAYER_TEXT: u8 = 1 << 6;
-const FLAG_INVERT_TEXT: u8 = 1 << 7;
+const FLAG_INVERT_TEXT_Y: u8 = 1 << 7;
+
+const AUTO_LAYER_MASK: u8 = 0x0f;
+const AXIS_FLAG_INVERT_SCROLL_X: u8 = 1 << 4;
+const AXIS_FLAG_INVERT_TEXT_X: u8 = 1 << 5;
 
 const DPI_TABLE: [i32; 16] = [
     200, 400, 600, 800, 1000, 1200, 1400, 1600, 1800, 2000, 2200, 2400, 2600, 2800, 3000, 3200,
@@ -106,7 +114,7 @@ impl VialSettingsData {
         self.text_sens = self.text_sens.clamp(1, 255);
         self.ball_axis = self.ball_axis.min(3);
         self.mode = self.mode.min(3);
-        self.auto_layer = self.auto_layer.min(15);
+        self.auto_layer &= AUTO_LAYER_MASK | AXIS_FLAG_INVERT_SCROLL_X | AXIS_FLAG_INVERT_TEXT_X;
         self
     }
 }
@@ -180,16 +188,24 @@ pub fn text_sens() -> i32 {
     TEXT_SENS.load(Ordering::Relaxed).max(1) as i32
 }
 
-pub fn invert_scroll() -> bool {
-    FLAGS.load(Ordering::Relaxed) & FLAG_INVERT_SCROLL != 0
+pub fn invert_scroll_x() -> bool {
+    AUTO_LAYER.load(Ordering::Relaxed) & AXIS_FLAG_INVERT_SCROLL_X != 0
 }
 
-pub fn invert_text() -> bool {
-    FLAGS.load(Ordering::Relaxed) & FLAG_INVERT_TEXT != 0
+pub fn invert_scroll_y() -> bool {
+    FLAGS.load(Ordering::Relaxed) & FLAG_INVERT_SCROLL_Y != 0
+}
+
+pub fn invert_text_x() -> bool {
+    AUTO_LAYER.load(Ordering::Relaxed) & AXIS_FLAG_INVERT_TEXT_X != 0
+}
+
+pub fn invert_text_y() -> bool {
+    FLAGS.load(Ordering::Relaxed) & FLAG_INVERT_TEXT_Y != 0
 }
 
 pub fn auto_layer() -> u8 {
-    AUTO_LAYER.load(Ordering::Relaxed).min(15)
+    AUTO_LAYER.load(Ordering::Relaxed) & AUTO_LAYER_MASK
 }
 
 pub fn auto_layer_enabled_for_mode(mode: u8) -> bool {
@@ -218,15 +234,17 @@ pub fn get_setting(qsid: u16, out: &mut [u8]) -> Option<usize> {
         QSID_TEXT_SENS => settings.text_sens,
         QSID_BALL_AXIS => settings.ball_axis,
         QSID_MODE => settings.mode,
-        QSID_INVERT_SCROLL => u8::from(settings.flags & FLAG_INVERT_SCROLL != 0),
+        QSID_INVERT_SCROLL_Y => u8::from(settings.flags & FLAG_INVERT_SCROLL_Y != 0),
         QSID_ACCELERATION => u8::from(settings.flags & FLAG_ACCELERATION != 0),
         QSID_STICKY_MODE => u8::from(settings.flags & FLAG_STICKY_MODE != 0),
         QSID_AUTO_LAYER_NORMAL => u8::from(settings.flags & FLAG_AUTO_LAYER_NORMAL != 0),
-        QSID_AUTO_LAYER => settings.auto_layer,
+        QSID_AUTO_LAYER => settings.auto_layer & AUTO_LAYER_MASK,
         QSID_AUTO_LAYER_SNIPER => u8::from(settings.flags & FLAG_AUTO_LAYER_SNIPER != 0),
         QSID_AUTO_LAYER_SCROLL => u8::from(settings.flags & FLAG_AUTO_LAYER_SCROLL != 0),
         QSID_AUTO_LAYER_TEXT => u8::from(settings.flags & FLAG_AUTO_LAYER_TEXT != 0),
-        QSID_INVERT_TEXT => u8::from(settings.flags & FLAG_INVERT_TEXT != 0),
+        QSID_INVERT_TEXT_Y => u8::from(settings.flags & FLAG_INVERT_TEXT_Y != 0),
+        QSID_INVERT_SCROLL_X => u8::from(settings.auto_layer & AXIS_FLAG_INVERT_SCROLL_X != 0),
+        QSID_INVERT_TEXT_X => u8::from(settings.auto_layer & AXIS_FLAG_INVERT_TEXT_X != 0),
         _ => return None,
     };
     Some(1)
@@ -243,15 +261,28 @@ pub fn set_setting(qsid: u16, input: &[u8]) -> Option<VialSettingsData> {
         QSID_TEXT_SENS => settings.text_sens = value,
         QSID_BALL_AXIS => settings.ball_axis = value,
         QSID_MODE => settings.mode = value,
-        QSID_INVERT_SCROLL => set_flag(&mut settings.flags, FLAG_INVERT_SCROLL, value != 0),
+        QSID_INVERT_SCROLL_Y => set_flag(&mut settings.flags, FLAG_INVERT_SCROLL_Y, value != 0),
         QSID_ACCELERATION => set_flag(&mut settings.flags, FLAG_ACCELERATION, value != 0),
         QSID_STICKY_MODE => set_flag(&mut settings.flags, FLAG_STICKY_MODE, value != 0),
         QSID_AUTO_LAYER_NORMAL => set_flag(&mut settings.flags, FLAG_AUTO_LAYER_NORMAL, value != 0),
-        QSID_AUTO_LAYER => settings.auto_layer = value,
+        QSID_AUTO_LAYER => {
+            settings.auto_layer =
+                (settings.auto_layer & !AUTO_LAYER_MASK) | (value & AUTO_LAYER_MASK)
+        }
         QSID_AUTO_LAYER_SNIPER => set_flag(&mut settings.flags, FLAG_AUTO_LAYER_SNIPER, value != 0),
         QSID_AUTO_LAYER_SCROLL => set_flag(&mut settings.flags, FLAG_AUTO_LAYER_SCROLL, value != 0),
         QSID_AUTO_LAYER_TEXT => set_flag(&mut settings.flags, FLAG_AUTO_LAYER_TEXT, value != 0),
-        QSID_INVERT_TEXT => set_flag(&mut settings.flags, FLAG_INVERT_TEXT, value != 0),
+        QSID_INVERT_TEXT_Y => set_flag(&mut settings.flags, FLAG_INVERT_TEXT_Y, value != 0),
+        QSID_INVERT_SCROLL_X => set_flag(
+            &mut settings.auto_layer,
+            AXIS_FLAG_INVERT_SCROLL_X,
+            value != 0,
+        ),
+        QSID_INVERT_TEXT_X => set_flag(
+            &mut settings.auto_layer,
+            AXIS_FLAG_INVERT_TEXT_X,
+            value != 0,
+        ),
         _ => return None,
     }
 

@@ -6,8 +6,13 @@ use std::{env, fs};
 use xz2::read::XzEncoder;
 
 fn main() {
+    const FIRMWARE_VERSION: &str = "0.1.2";
+    const FIRMWARE_VERSION_BCD: &str = "0x0102";
+
     println!("cargo:rerun-if-changed=vial.json");
     println!("cargo:rerun-if-changed=keyboard.toml");
+    println!("cargo:rustc-env=RMK_FIRMWARE_VERSION={FIRMWARE_VERSION}");
+    println!("cargo:rustc-env=RMK_FIRMWARE_VERSION_BCD={FIRMWARE_VERSION_BCD}");
     println!(
         "cargo:rustc-env=RMK_VIAL_DEVICE_SETTINGS_FN=crate::vial_settings::vial_device_settings"
     );

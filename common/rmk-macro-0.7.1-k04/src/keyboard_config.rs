@@ -18,6 +18,17 @@ pub(crate) fn expand_keyboard_info(keyboard_config: &KeyboardTomlConfig) -> proc
     let product_name = basic.product_name.clone();
     let manufacturer = basic.manufacturer.clone();
     let serial_number = basic.serial_number.clone();
+    let firmware_version = std::env::var("RMK_FIRMWARE_VERSION").unwrap_or_else(|_| "0.0.0".to_owned());
+    let device_version = std::env::var("RMK_FIRMWARE_VERSION_BCD")
+        .ok()
+        .and_then(|value| {
+            let value = value.trim();
+            value
+                .strip_prefix("0x")
+                .or_else(|| value.strip_prefix("0X"))
+                .map_or_else(|| value.parse().ok(), |hex| u16::from_str_radix(hex, 16).ok())
+        })
+        .unwrap_or(0x0001);
 
     let num_col = layout.cols as usize;
     let num_row = layout.rows as usize;
@@ -35,6 +46,8 @@ pub(crate) fn expand_keyboard_info(keyboard_config: &KeyboardTomlConfig) -> proc
             manufacturer: #manufacturer,
             product_name: #product_name,
             serial_number: #serial_number,
+            firmware_version: #firmware_version,
+            device_version: #device_version,
         };
     }
 }

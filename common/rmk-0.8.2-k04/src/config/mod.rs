@@ -255,6 +255,10 @@ pub struct DeviceConfig<'a> {
     pub product_name: &'a str,
     /// Serial number
     pub serial_number: &'a str,
+    /// Firmware version string.
+    pub firmware_version: &'a str,
+    /// Device release version in BCD.
+    pub device_version: u16,
 }
 
 impl Default for DeviceConfig<'_> {
@@ -265,6 +269,8 @@ impl Default for DeviceConfig<'_> {
             manufacturer: "RMK",
             product_name: "RMK Keyboard",
             serial_number: "vial:f64c2b3c:000001",
+            firmware_version: "0.0.0",
+            device_version: 0x0001,
         }
     }
 }

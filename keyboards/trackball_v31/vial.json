@@ -2,6 +2,10 @@
     "name": "Ergohaven Trackball Mini v3.1",
     "vendorId": "0xE126",
     "productId": "0x00C2",
+    "firmware": {
+        "version": "0.1.2"
+    },
+    "firmwareVersion": "0.1.2",
     "lighting": "none",
     "matrix": {
         "rows": 2,

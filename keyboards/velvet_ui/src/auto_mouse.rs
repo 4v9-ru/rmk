@@ -185,13 +185,18 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
                 let acc_x = SCROLL_ACCUM_X.fetch_add(dx, Ordering::Relaxed) + dx;
                 let acc_y = SCROLL_ACCUM_Y.fetch_add(dy, Ordering::Relaxed) + dy;
 
-                let wheel_direction = if rmk::vial_settings::invert_scroll() {
+                let wheel_direction = if rmk::vial_settings::invert_scroll_y() {
                     1
                 } else {
                     -1
                 };
                 let wheel = (wheel_direction * (acc_y / divisor)) as i8;
-                let pan = (acc_x / divisor) as i8;
+                let pan_direction = if rmk::vial_settings::invert_scroll_x() {
+                    -1
+                } else {
+                    1
+                };
+                let pan = (pan_direction * (acc_x / divisor)) as i8;
 
                 if wheel != 0 || pan != 0 {
                     SCROLL_ACCUM_X.store(acc_x % divisor, Ordering::Relaxed);
@@ -249,7 +254,10 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
                     NORMAL_ACCUM_X.store(0, Ordering::Relaxed);
                 }
 
-                if rmk::vial_settings::invert_text() {
+                if rmk::vial_settings::invert_text_x() {
+                    shift_x = -shift_x;
+                }
+                if rmk::vial_settings::invert_text_y() {
                     shift_y = -shift_y;
                 }
 

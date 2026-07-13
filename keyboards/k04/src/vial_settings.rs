@@ -11,6 +11,11 @@ pub const BALL_DPI_TABLE: [u16; 16] = [
     200, 400, 600, 800, 1000, 1200, 1400, 1600, 1800, 2000, 2200, 2400, 2600, 2800, 3000, 3200,
 ];
 
+pub const TEXT_AXIS_SIMILAR_RATIO: u8 = 8;
+pub const TEXT_AXIS_IDLE_MS: u32 = 30_000;
+pub const TEXT_AXIS_UNLOCK_RATIO: u8 = 8;
+pub const TEXT_AXIS_UNLOCK_DISTANCE: u16 = 600;
+
 const VERSION: u8 = 9;
 pub const SETTINGS_LEN: usize = 43;
 pub const SETTINGS_SYNC_LEN: usize = 27;

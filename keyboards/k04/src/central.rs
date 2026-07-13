@@ -18,7 +18,8 @@ mod keyboard_central {
     use crate::deep_sleep::deep_sleep_task;
     use crate::layer_led::layer_led_task;
     use crate::touchpad::{
-        auto_layer_idle_loop, touchpad_task, Iqs5xxTouchpad, K04PointingProcessor,
+        auto_layer_idle_loop, modifier_cache_task, touchpad_task, Iqs5xxTouchpad,
+        K04PointingProcessor,
     };
     use crate::trackball::{new_trackball_from_pins, trackball_task};
     use crate::vial_settings::{encoder_interval_ms, encoder_module_enabled, ModuleSide};
@@ -36,6 +37,7 @@ mod keyboard_central {
         spawner.spawn(layer_led_task(layer_led)).unwrap();
         spawner.spawn(deep_sleep_task()).unwrap();
         spawner.spawn(settings_sync_task()).unwrap();
+        spawner.spawn(modifier_cache_task()).unwrap();
 
         let trackball = new_trackball_from_pins(p.P0_01, p.P0_00, p.P0_05, p.P1_09);
         spawner

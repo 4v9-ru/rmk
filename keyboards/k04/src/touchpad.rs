@@ -6,8 +6,9 @@ use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use embassy_nrf::twim::Twim;
 use embassy_time::{Duration, Instant, Timer};
+use rmk::channel::CONTROLLER_CHANNEL;
 use rmk::descriptor::KeyboardReport;
-use rmk::event::{Axis, Event};
+use rmk::event::{Axis, ControllerEvent, Event};
 use rmk::hid::Report;
 use rmk::input_device::{InputProcessor, ProcessResult};
 use rmk::keyboard::K04_MOUSE_BUTTONS;
@@ -21,7 +22,8 @@ use crate::vial_settings::{
     orientation, pointing_mode, pointing_module_claimed_by_other, pointing_module_enabled,
     release_pointing_module, scale_touch_delta, sens, side_from_index, side_index,
     touch_gestures_enabled, wait_pointing_module_selection_change, ModuleKind, ModuleSide,
-    PointingMode,
+    PointingMode, TEXT_AXIS_IDLE_MS, TEXT_AXIS_SIMILAR_RATIO, TEXT_AXIS_UNLOCK_DISTANCE,
+    TEXT_AXIS_UNLOCK_RATIO,
 };
 
 const IQS5XX_ADDR: u8 = 0x74;
@@ -82,6 +84,7 @@ const KEY_DOWN: u8 = 0x51;
 const KEY_UP: u8 = 0x52;
 const AUTO_LAYER_NONE: u8 = 0xff;
 
+static HELD_MODIFIER_BITS: AtomicU8 = AtomicU8::new(0);
 static ACTIVE_AUTO_LAYER: AtomicU8 = AtomicU8::new(AUTO_LAYER_NONE);
 static LAST_AUTO_MOTION_MS: AtomicU32 = AtomicU32::new(0);
 static AUTO_LAYER_HELD_KEYS: AtomicU8 = AtomicU8::new(0);
@@ -462,6 +465,9 @@ pub struct K04PointingProcessor<
     scroll_accum_v: i32,
     text_accum_x: i32,
     text_accum_y: i32,
+    text_axis_lock: TextAxisLock,
+    text_axis_unlock_accum: u32,
+    text_last_motion_ms: u32,
     normal_last_motion_ms: u32,
     touch_last_motion_ms: u32,
     touch_last_flush_ms: u32,
@@ -485,6 +491,9 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
             scroll_accum_v: 0,
             text_accum_x: 0,
             text_accum_y: 0,
+            text_axis_lock: TextAxisLock::None,
+            text_axis_unlock_accum: 0,
+            text_last_motion_ms: 0,
             normal_last_motion_ms: 0,
             touch_last_motion_ms: 0,
             touch_last_flush_ms: 0,
@@ -641,15 +650,58 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
         }
     }
 
-    async fn send_text_motion(&mut self, side: ModuleSide, x: i16, y: i16) {
+    async fn send_text_motion(
+        &mut self,
+        side: ModuleSide,
+        raw_x: i16,
+        raw_y: i16,
+        motion_x: i16,
+        motion_y: i16,
+    ) {
+        let now = now_ms();
+        if self.text_last_motion_ms != 0
+            && now.wrapping_sub(self.text_last_motion_ms) > TEXT_AXIS_IDLE_MS
+        {
+            self.text_axis_lock = TextAxisLock::None;
+            self.text_axis_unlock_accum = 0;
+            self.text_accum_x = 0;
+            self.text_accum_y = 0;
+        }
+
+        let (motion_x, motion_y) = apply_text_axis_sticky(
+            &mut self.text_axis_lock,
+            &mut self.text_axis_unlock_accum,
+            raw_x,
+            raw_y,
+            motion_x,
+            motion_y,
+        );
+
+        if motion_y == 0 && raw_y != 0 {
+            self.text_accum_y = 0;
+        }
+        if motion_x == 0 && raw_x != 0 {
+            self.text_accum_x = 0;
+        }
+        if motion_x == 0 && motion_y == 0 {
+            return;
+        }
+
+        self.text_last_motion_ms = now;
+
         let divisor = i32::from(sens(side, PointingMode::Text));
         let invert_x = if invert_text_x(side) { -1 } else { 1 };
         let invert_y = if invert_text_y(side) { -1 } else { 1 };
-        self.text_accum_x = self.text_accum_x.saturating_add(i32::from(x) * invert_x);
-        self.text_accum_y = self.text_accum_y.saturating_add(i32::from(y) * invert_y);
+        self.text_accum_x = self
+            .text_accum_x
+            .saturating_add(i32::from(motion_x) * invert_x);
+        self.text_accum_y = self
+            .text_accum_y
+            .saturating_add(i32::from(motion_y) * invert_y);
 
-        let x_steps = drain_steps(&mut self.text_accum_x, divisor).clamp(-4, 4);
-        let y_steps = drain_steps(&mut self.text_accum_y, divisor).clamp(-4, 4);
+        let mut x_steps = drain_steps(&mut self.text_accum_x, divisor).clamp(-4, 4);
+        let mut y_steps = drain_steps(&mut self.text_accum_y, divisor).clamp(-4, 4);
+        (x_steps, y_steps) = text_axis_lock_by_ratio(x_steps, y_steps);
 
         for _ in 0..x_steps.unsigned_abs() {
             self.tap_key(if x_steps > 0 { KEY_RIGHT } else { KEY_LEFT })
@@ -669,6 +721,7 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
 
     async fn send_keyboard_key(&self, keycode: u8) {
         let mut report = KeyboardReport::default();
+        report.modifier = HELD_MODIFIER_BITS.load(Ordering::Relaxed);
         if keycode != 0 {
             report.keycodes[0] = keycode;
         }
@@ -690,6 +743,8 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
             x = scale_touch_delta(x, side);
             y = scale_touch_delta(y, side);
         }
+        let raw_x = x;
+        let raw_y = y;
         if acceleration(side) && !is_touch_drag {
             x = accelerate_axis(x);
             y = accelerate_axis(y);
@@ -736,7 +791,7 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
                 }
             }
             PointingMode::Scroll => self.send_scroll_motion(side, x, y).await,
-            PointingMode::Text => self.send_text_motion(side, x, y).await,
+            PointingMode::Text => self.send_text_motion(side, raw_x, raw_y, x, y).await,
         }
     }
 
@@ -947,6 +1002,155 @@ fn accelerate_axis(value: i16) -> i16 {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TextAxisLock {
+    None,
+    Horizontal,
+    Vertical,
+}
+
+fn text_axis_lock_by_ratio(ax: i16, ay: i16) -> (i16, i16) {
+    let ax_abs = ax.unsigned_abs();
+    let ay_abs = ay.unsigned_abs();
+    if ax_abs == 0 || ay_abs == 0 {
+        return (ax, ay);
+    }
+
+    let ratio = u16::from(TEXT_AXIS_SIMILAR_RATIO.max(1));
+    let (max, min, dominant_x) = if ax_abs >= ay_abs {
+        (ax_abs, ay_abs, true)
+    } else {
+        (ay_abs, ax_abs, false)
+    };
+
+    if max <= min.saturating_mul(ratio) {
+        return (ax, ay);
+    }
+    if dominant_x {
+        (ax, 0)
+    } else {
+        (0, ay)
+    }
+}
+
+fn text_axis_unlock_candidate(raw_x: i16, raw_y: i16, lock: TextAxisLock) -> bool {
+    let ratio = u16::from(TEXT_AXIS_UNLOCK_RATIO.max(1));
+    match lock {
+        TextAxisLock::Horizontal => {
+            raw_y.unsigned_abs().saturating_mul(ratio) >= raw_x.unsigned_abs()
+        }
+        TextAxisLock::Vertical => {
+            raw_x.unsigned_abs().saturating_mul(ratio) >= raw_y.unsigned_abs()
+        }
+        TextAxisLock::None => false,
+    }
+}
+
+fn locked_axis_dominates(raw_x: i16, raw_y: i16, lock: TextAxisLock) -> bool {
+    let ratio = u16::from(TEXT_AXIS_UNLOCK_RATIO.max(1));
+    match lock {
+        TextAxisLock::Horizontal => {
+            raw_x != 0 && raw_x.unsigned_abs().saturating_mul(ratio) >= raw_y.unsigned_abs()
+        }
+        TextAxisLock::Vertical => {
+            raw_y != 0 && raw_y.unsigned_abs().saturating_mul(ratio) >= raw_x.unsigned_abs()
+        }
+        TextAxisLock::None => false,
+    }
+}
+
+fn opposite_axis_abs(raw_x: i16, raw_y: i16, lock: TextAxisLock) -> u16 {
+    match lock {
+        TextAxisLock::Horizontal => raw_y.unsigned_abs(),
+        TextAxisLock::Vertical => raw_x.unsigned_abs(),
+        TextAxisLock::None => 0,
+    }
+}
+
+fn switch_axis_lock(lock: &mut TextAxisLock) {
+    *lock = match *lock {
+        TextAxisLock::Horizontal => TextAxisLock::Vertical,
+        TextAxisLock::Vertical => TextAxisLock::Horizontal,
+        TextAxisLock::None => TextAxisLock::None,
+    };
+}
+
+fn apply_text_axis_sticky(
+    lock: &mut TextAxisLock,
+    unlock_accum: &mut u32,
+    raw_x: i16,
+    raw_y: i16,
+    motion_x: i16,
+    motion_y: i16,
+) -> (i16, i16) {
+    let (filtered_x, filtered_y) = text_axis_lock_by_ratio(raw_x, raw_y);
+
+    match *lock {
+        TextAxisLock::None => {
+            *unlock_accum = 0;
+            if filtered_x != 0 && filtered_y != 0 {
+                (motion_x, motion_y)
+            } else if filtered_x != 0 {
+                *lock = TextAxisLock::Horizontal;
+                (motion_x, 0)
+            } else if filtered_y != 0 {
+                *lock = TextAxisLock::Vertical;
+                (0, motion_y)
+            } else {
+                (0, 0)
+            }
+        }
+        TextAxisLock::Horizontal => {
+            if text_axis_unlock_candidate(raw_x, raw_y, TextAxisLock::Horizontal) {
+                *unlock_accum = unlock_accum.saturating_add(u32::from(opposite_axis_abs(
+                    raw_x,
+                    raw_y,
+                    TextAxisLock::Horizontal,
+                )));
+                if *unlock_accum >= u32::from(TEXT_AXIS_UNLOCK_DISTANCE) {
+                    switch_axis_lock(lock);
+                    *unlock_accum = 0;
+                    return apply_text_axis_sticky(
+                        lock,
+                        unlock_accum,
+                        raw_x,
+                        raw_y,
+                        motion_x,
+                        motion_y,
+                    );
+                }
+            } else if locked_axis_dominates(raw_x, raw_y, TextAxisLock::Horizontal) {
+                *unlock_accum = 0;
+            }
+            (motion_x, 0)
+        }
+        TextAxisLock::Vertical => {
+            if text_axis_unlock_candidate(raw_x, raw_y, TextAxisLock::Vertical) {
+                *unlock_accum = unlock_accum.saturating_add(u32::from(opposite_axis_abs(
+                    raw_x,
+                    raw_y,
+                    TextAxisLock::Vertical,
+                )));
+                if *unlock_accum >= u32::from(TEXT_AXIS_UNLOCK_DISTANCE) {
+                    switch_axis_lock(lock);
+                    *unlock_accum = 0;
+                    return apply_text_axis_sticky(
+                        lock,
+                        unlock_accum,
+                        raw_x,
+                        raw_y,
+                        motion_x,
+                        motion_y,
+                    );
+                }
+            } else if locked_axis_dominates(raw_x, raw_y, TextAxisLock::Vertical) {
+                *unlock_accum = 0;
+            }
+            (0, motion_y)
+        }
+    }
+}
+
 fn drain_steps(accum: &mut i32, divisor: i32) -> i16 {
     if divisor <= 0 {
         return 0;
@@ -989,6 +1193,16 @@ pub async fn auto_layer_idle_loop<
             if previous != AUTO_LAYER_NONE {
                 keymap.borrow_mut().deactivate_layer(previous);
             }
+        }
+    }
+}
+
+#[embassy_executor::task]
+pub async fn modifier_cache_task() {
+    let mut sub = defmt::unwrap!(CONTROLLER_CHANNEL.subscriber());
+    loop {
+        if let ControllerEvent::Modifier(mods) = sub.next_message_pure().await {
+            HELD_MODIFIER_BITS.store(mods.into_bits(), Ordering::Relaxed);
         }
     }
 }

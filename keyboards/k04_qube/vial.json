@@ -3,7 +3,7 @@
     "vendorId": "0xE126",
     "productId": "0x0071",
     "entropy": {
-        "liveFeatures": ["time", "layout"]
+        "liveFeatures": ["time", "media"]
     },
     "lighting": "none",
     "matrix": {

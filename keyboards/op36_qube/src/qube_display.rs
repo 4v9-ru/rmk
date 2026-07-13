@@ -61,6 +61,8 @@ const STRIPE_BYTES: usize = SCREEN_W * STRIPE_H * 2;
 const BACKLIGHT_ACTIVE_HIGH: bool = true;
 const SAFE_X: i32 = 18;
 const SAFE_W: u32 = SCREEN_W as u32 - (SAFE_X as u32 * 2);
+const MEDIA_VISIBLE_CHARS: usize = 26;
+const MEDIA_GAP_CHARS: usize = 3;
 const PANEL_RADIUS: u32 = 14;
 const CHIP_RADIUS: u32 = 7;
 const BAR_RADIUS: u32 = 5;
@@ -380,7 +382,9 @@ where
             }),
             irq,
         },
-        renderer: QubeStatusRenderer { host_data },
+        renderer: QubeStatusRenderer {
+            host_data: host_data.clone(),
+        },
         ctx: RenderContext::default(),
         last_host_data: host_data,
         last_render: Instant::from_ticks(0),
@@ -417,7 +421,7 @@ where
     fn sync_host_data(&mut self) {
         let host_data = rmk::host_data::snapshot();
         if host_data != self.last_host_data {
-            self.last_host_data = host_data;
+            self.last_host_data = host_data.clone();
             self.renderer.host_data = host_data;
             self.request_redraw();
         }
@@ -578,7 +582,7 @@ where
         central: &mut impl EventSubscriber<Event = CentralConnectedEvent>,
     ) -> UiEv {
         match select(
-            Timer::after(Duration::from_secs(1)),
+            Timer::after(Duration::from_millis(250)),
             Self::next_any(
                 layer, wpm, led, mods, key, sleep, bat, conn, peri_conn, peri_bat, central,
             ),
@@ -667,6 +671,9 @@ where
             UiEv::Central(e) => self.ctx.central_connected = e.connected,
             UiEv::HostDataTick => {
                 self.sync_host_data();
+                if self.renderer.media_needs_marquee() {
+                    self.request_redraw();
+                }
                 need_redraw = false;
             }
         }
@@ -708,16 +715,24 @@ pub struct QubeStatusRenderer {
     host_data: rmk::host_data::HostData,
 }
 
+impl QubeStatusRenderer {
+    fn media_needs_marquee(&self) -> bool {
+        let mut media: heapless::String<72> = heapless::String::new();
+        push_media_label(&mut media, &self.host_data);
+        media.len() > MEDIA_VISIBLE_CHARS
+    }
+}
+
 impl DisplayRenderer<Rgb565> for QubeStatusRenderer {
     fn render<D: DrawTarget<Color = Rgb565>>(&mut self, ctx: &RenderContext, display: &mut D) {
         let _ = display.clear(COL_BG);
 
         let layer_meta = MonoTextStyle::new(&FONT_6X10, COL_LABEL);
+        let header_media = MonoTextStyle::new(&FONT_6X10, COL_FG);
+        let header_fallback = MonoTextStyle::new(&FONT_8X13, COL_ACCENT);
         let body = MonoTextStyle::new(&FONT_8X13, COL_FG);
-        let body_accent = MonoTextStyle::new(&FONT_8X13, COL_ACCENT);
         let title_shadow = MonoTextStyle::new(&FONT_10X20, COL_ACCENT_DIM);
         let title = MonoTextStyle::new(&FONT_10X20, COL_FG);
-        let top = TextStyleBuilder::new().baseline(Baseline::Top).build();
         let tc = TextStyleBuilder::new()
             .alignment(Alignment::Center)
             .baseline(Baseline::Top)
@@ -740,13 +755,13 @@ impl DisplayRenderer<Rgb565> for QubeStatusRenderer {
         draw_panel(display, SAFE_X, 14, SAFE_W, 28, COL_PANEL, COL_BORDER_DIM);
         draw_round_fill(display, SAFE_X + 11, 23, 3, 10, 2, COL_ACCENT);
         let mut s: heapless::String<16> = heapless::String::new();
-        let _ = s.push_str(host_layout_label(self.host_data.layout));
-        let _ =
-            Text::with_text_style(&s, Point::new(SAFE_X + 22, 21), body_accent, top).draw(display);
-        s.clear();
-        push_host_time(&mut s, self.host_data.hour, self.host_data.minute);
-        let _ = Text::with_text_style(&s, Point::new(SAFE_X + SAFE_W as i32 - 14, 21), body, tr)
-            .draw(display);
+        draw_media_or_fallback(display, &self.host_data, header_media, header_fallback);
+        if host_time_available(&self.host_data) {
+            push_host_time(&mut s, self.host_data.hour, self.host_data.minute);
+            let _ =
+                Text::with_text_style(&s, Point::new(SAFE_X + SAFE_W as i32 - 14, 21), body, tr)
+                    .draw(display);
+        }
 
         // Layer panel.
         draw_panel(
@@ -987,15 +1002,6 @@ fn layer_name(layer: u8) -> &'static str {
     }
 }
 
-fn host_layout_label(layout: Option<u8>) -> &'static str {
-    match layout {
-        Some(0) => "EN",
-        Some(1) => "RU",
-        Some(_) => "??",
-        None => "--",
-    }
-}
-
 fn push_host_time(buffer: &mut heapless::String<16>, hour: Option<u8>, minute: Option<u8>) {
     match (hour, minute) {
         (Some(hour), Some(minute)) => {
@@ -1005,4 +1011,80 @@ fn push_host_time(buffer: &mut heapless::String<16>, hour: Option<u8>, minute: O
             let _ = buffer.push_str("--:--");
         }
     }
+}
+
+fn draw_media_or_fallback<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    host_data: &rmk::host_data::HostData,
+    media_style: MonoTextStyle<'_, Rgb565>,
+    fallback_style: MonoTextStyle<'_, Rgb565>,
+) {
+    let top = TextStyleBuilder::new().baseline(Baseline::Top).build();
+    let mut media: heapless::String<72> = heapless::String::new();
+    push_media_label(&mut media, host_data);
+
+    if media.is_empty() {
+        if !host_time_available(host_data) {
+            let _ = Text::with_text_style("QUBE", Point::new(SAFE_X + 22, 21), fallback_style, top)
+                .draw(display);
+        }
+        return;
+    }
+
+    let mut visible: heapless::String<32> = heapless::String::new();
+    if media.len() <= MEDIA_VISIBLE_CHARS {
+        let _ = visible.push_str(&media);
+    } else {
+        let elapsed = Instant::now()
+            .duration_since(Instant::from_ticks(0))
+            .as_millis() as usize;
+        let offset = (elapsed / 300) % (media.len() + MEDIA_GAP_CHARS);
+        push_marquee_slice(&mut visible, &media, offset);
+    }
+
+    let _ = Text::with_text_style(&visible, Point::new(SAFE_X + 22, 22), media_style, top)
+        .draw(display);
+}
+
+fn push_media_label(buffer: &mut heapless::String<72>, host_data: &rmk::host_data::HostData) {
+    if !host_data.media_artist.is_empty() {
+        push_ascii_text(buffer, &host_data.media_artist);
+    }
+    if !host_data.media_title.is_empty() {
+        if !buffer.is_empty() {
+            let _ = buffer.push_str(" - ");
+        }
+        push_ascii_text(buffer, &host_data.media_title);
+    }
+}
+
+fn push_ascii_text<const N: usize>(buffer: &mut heapless::String<N>, value: &str) {
+    for ch in value.chars() {
+        let ch = if ch.is_ascii_graphic() || ch == ' ' {
+            ch
+        } else {
+            '?'
+        };
+        if buffer.push(ch).is_err() {
+            break;
+        }
+    }
+}
+
+fn push_marquee_slice(buffer: &mut heapless::String<32>, text: &str, offset: usize) {
+    let bytes = text.as_bytes();
+    let cycle_len = bytes.len() + MEDIA_GAP_CHARS;
+    for i in 0..MEDIA_VISIBLE_CHARS {
+        let idx = (offset + i) % cycle_len;
+        let ch = if idx < bytes.len() {
+            bytes[idx] as char
+        } else {
+            ' '
+        };
+        let _ = buffer.push(ch);
+    }
+}
+
+fn host_time_available(host_data: &rmk::host_data::HostData) -> bool {
+    host_data.hour.is_some() && host_data.minute.is_some()
 }

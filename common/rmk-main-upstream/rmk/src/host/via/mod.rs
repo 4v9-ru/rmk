@@ -32,8 +32,25 @@ fn process_host_data_packet(data: &[u8; 32]) -> bool {
             crate::host_data::update_layout(data[1]);
             true
         }
-        HOST_DATA_VOLUME | HOST_DATA_MEDIA_ARTIST | HOST_DATA_MEDIA_TITLE => true,
+        HOST_DATA_MEDIA_ARTIST => {
+            crate::host_data::update_media_artist(host_data_text(data));
+            true
+        }
+        HOST_DATA_MEDIA_TITLE => {
+            crate::host_data::update_media_title(host_data_text(data));
+            true
+        }
+        HOST_DATA_VOLUME => true,
         _ => false,
+    }
+}
+
+fn host_data_text(data: &[u8; 32]) -> &str {
+    let len = (data[1] as usize).min(30);
+    let bytes = &data[2..2 + len];
+    match core::str::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(err) => core::str::from_utf8(&bytes[..err.valid_up_to()]).unwrap_or(""),
     }
 }
 

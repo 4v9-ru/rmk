@@ -17,7 +17,7 @@ combo_max_num = 32
 morse_max_num = 32
 macro_space_size = 2048
 ble_profiles_num = 5
-mouse_key_interval = 5
+mouse_key_interval = 20
 mouse_wheel_interval = 50
 
 # https://rmk.rs/main/docs/configuration/wireless

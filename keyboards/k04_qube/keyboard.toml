@@ -22,11 +22,8 @@ ble_profiles_num = 5
 enabled = true
 
 [storage]
-# Bring-up only: clear old K:04 0.8.2 / previous Qube storage so RMK main can
-# initialize keymap and split bonds before display startup. Revert after first
-# successful hardware test.
-clear_storage = true
-clear_layout = true
+clear_storage = false
+clear_layout = false
 
 [event]
 peripheral_battery.pubs = 2

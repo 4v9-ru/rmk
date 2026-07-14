@@ -11,6 +11,12 @@ fn main() {
     println!("cargo:rerun-if-changed=memory_halves.x");
     println!("cargo:rerun-if-changed=memory_qube.x");
 
+    if env::var_os("CARGO_FEATURE_QUBE").is_some() {
+        println!(
+            "cargo:rustc-env=RMK_VIAL_DEVICE_SETTINGS_FN=crate::layer_names::vial_device_settings"
+        );
+    }
+
     generate_vial_config();
 
     let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());

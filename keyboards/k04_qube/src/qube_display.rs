@@ -59,6 +59,7 @@ const STRIPE_H: usize = 48;
 const STRIPE_BYTES: usize = SCREEN_W * STRIPE_H * 2;
 
 const BACKLIGHT_ACTIVE_HIGH: bool = true;
+const UI_X_OFFSET: i32 = 5;
 const SAFE_X: i32 = 18;
 const SAFE_W: u32 = SCREEN_W as u32 - (SAFE_X as u32 * 2);
 const MEDIA_VISIBLE_CHARS: usize = 26;
@@ -66,6 +67,11 @@ const MEDIA_GAP_CHARS: usize = 3;
 const PANEL_RADIUS: u32 = 14;
 const CHIP_RADIUS: u32 = 7;
 const BAR_RADIUS: u32 = 5;
+
+const HEADER_DIRTY: DirtyRegion = DirtyRegion::range(12, 44);
+const LAYER_DIRTY: DirtyRegion = DirtyRegion::range(50, 138);
+const MODIFIER_DIRTY: DirtyRegion = DirtyRegion::range(144, 166);
+const BATTERY_DIRTY: DirtyRegion = DirtyRegion::range(174, 224);
 
 const COL_BG: Rgb565 = Rgb565::new(0, 2, 4);
 const COL_FG: Rgb565 = Rgb565::new(29, 61, 30);
@@ -86,6 +92,28 @@ const COL_BORDER_DIM: Rgb565 = Rgb565::new(3, 8, 11);
 type SpiDev = ExclusiveDevice<Spim<'static>, Output<'static>, NoDelay>;
 type Di = SpiInterface<SpiDev, Output<'static>>;
 type Panel = LcdDisplay<Di, ST7789, Output<'static>>;
+
+#[derive(Clone, Copy)]
+enum DirtyRegion {
+    Full,
+    Range { y0: u16, y1: u16 },
+}
+
+impl DirtyRegion {
+    const fn range(y0: u16, y1: u16) -> Self {
+        Self::Range { y0, y1 }
+    }
+
+    fn union(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Full, _) | (_, Self::Full) => Self::Full,
+            (Self::Range { y0: a0, y1: a1 }, Self::Range { y0: b0, y1: b1 }) => Self::Range {
+                y0: a0.min(b0),
+                y1: a1.max(b1),
+            },
+        }
+    }
+}
 
 // --- Stripe framebuffer (clip window into full screen) ----------------------
 
@@ -113,6 +141,7 @@ impl StripeLcd {
     }
 
     fn put_pixel(&mut self, x: i32, y: i32, color: Rgb565) {
+        let x = x + UI_X_OFFSET;
         if x < 0 || y < 0 {
             return;
         }
@@ -255,16 +284,25 @@ where
         }
     }
 
-    /// Full-screen redraw via stripe multipass.
-    async fn present(&mut self, renderer: &mut QubeStatusRenderer, ctx: &RenderContext) {
+    async fn present_dirty(
+        &mut self,
+        renderer: &mut QubeStatusRenderer,
+        ctx: &RenderContext,
+        dirty: DirtyRegion,
+    ) {
         self.ensure_init().await;
         let LcdState::Active(lcd) = &mut self.state else {
             return;
         };
 
-        let mut y: u16 = 0;
-        while (y as usize) < SCREEN_H {
-            let remaining = (SCREEN_H as u16).saturating_sub(y);
+        let (y0, y1) = match dirty {
+            DirtyRegion::Full => (0, SCREEN_H as u16),
+            DirtyRegion::Range { y0, y1 } => (y0.min(SCREEN_H as u16), y1.min(SCREEN_H as u16)),
+        };
+
+        let mut y = y0;
+        while y < y1 {
+            let remaining = y1.saturating_sub(y);
             let h = remaining.min(STRIPE_H as u16);
             lcd.set_band(y, h);
             lcd.clear_stripe(COL_BG);
@@ -336,11 +374,14 @@ where
         + 'static,
 {
     lcd: LazyQubeLcd<I>,
+    backlight: Output<'static>,
     renderer: QubeStatusRenderer,
     ctx: RenderContext,
     last_host_data: rmk::host_data::HostData,
+    last_layer_names_version: u8,
     last_render: Instant,
     pending: bool,
+    dirty: DirtyRegion,
     min_interval: Duration,
 }
 
@@ -366,8 +407,7 @@ where
     } else {
         Level::Low
     };
-    static BL: StaticCell<Output<'static>> = StaticCell::new();
-    let _ = BL.init(Output::new(bl, level, OutputDrive::Standard));
+    let backlight = Output::new(bl, level, OutputDrive::Standard);
     let host_data = rmk::host_data::snapshot();
 
     DongleScreen {
@@ -382,13 +422,16 @@ where
             }),
             irq,
         },
+        backlight,
         renderer: QubeStatusRenderer {
             host_data: host_data.clone(),
         },
         ctx: RenderContext::default(),
         last_host_data: host_data,
+        last_layer_names_version: crate::layer_names::version(),
         last_render: Instant::from_ticks(0),
         pending: true,
+        dirty: DirtyRegion::Full,
         min_interval: Duration::from_millis(80),
     }
 }
@@ -403,19 +446,42 @@ where
 {
     async fn redraw(&mut self) {
         self.sync_host_data();
+        self.sync_layer_names();
         let now = Instant::now();
         if now.duration_since(self.last_render) < self.min_interval {
             self.pending = true;
             return;
         }
-        self.lcd.present(&mut self.renderer, &self.ctx).await;
+        self.lcd
+            .present_dirty(&mut self.renderer, &self.ctx, self.dirty)
+            .await;
         self.ctx.key_press_latch = false;
         self.pending = false;
+        self.dirty = DirtyRegion::Full;
         self.last_render = Instant::now();
     }
 
     fn request_redraw(&mut self) {
         self.pending = true;
+        self.dirty = DirtyRegion::Full;
+    }
+
+    fn request_redraw_region(&mut self, dirty: DirtyRegion) {
+        self.dirty = if self.pending {
+            self.dirty.union(dirty)
+        } else {
+            dirty
+        };
+        self.pending = true;
+    }
+
+    fn set_backlight(&mut self, on: bool) {
+        let level = if on == BACKLIGHT_ACTIVE_HIGH {
+            Level::High
+        } else {
+            Level::Low
+        };
+        self.backlight.set_level(level);
     }
 
     fn sync_host_data(&mut self) {
@@ -423,7 +489,15 @@ where
         if host_data != self.last_host_data {
             self.last_host_data = host_data.clone();
             self.renderer.host_data = host_data;
-            self.request_redraw();
+            self.request_redraw_region(HEADER_DIRTY);
+        }
+    }
+
+    fn sync_layer_names(&mut self) {
+        let version = crate::layer_names::version();
+        if version != self.last_layer_names_version {
+            self.last_layer_names_version = version;
+            self.request_redraw_region(LAYER_DIRTY);
         }
     }
 }
@@ -641,22 +715,47 @@ where
         // keys — skip redraw for those so multipass can keep up with layer/mod.
         let mut need_redraw = true;
         match ev {
-            UiEv::Layer(e) => self.ctx.layer = e.0,
-            UiEv::Wpm(e) => self.ctx.wpm = e.0,
+            UiEv::Layer(e) => {
+                self.ctx.layer = e.0;
+                self.request_redraw_region(LAYER_DIRTY);
+                need_redraw = false;
+            }
+            UiEv::Wpm(e) => {
+                self.ctx.wpm = e.0;
+                need_redraw = false;
+            }
             UiEv::Led(e) => {
                 self.ctx.caps_lock = e.0.caps_lock();
                 self.ctx.num_lock = e.0.num_lock();
+                self.request_redraw_region(MODIFIER_DIRTY);
+                need_redraw = false;
             }
-            UiEv::Mod(e) => self.ctx.modifiers = e.modifier,
+            UiEv::Mod(e) => {
+                self.ctx.modifiers = e.modifier;
+                self.request_redraw_region(MODIFIER_DIRTY);
+                need_redraw = false;
+            }
             UiEv::Key(e) => {
                 self.ctx.key_pressed = e.pressed;
                 if e.pressed {
                     self.ctx.key_press_latch = true;
+                    self.set_backlight(true);
                 }
                 need_redraw = false;
             }
-            UiEv::Sleep(e) => self.ctx.sleeping = e.0,
-            UiEv::Bat(e) => self.ctx.battery = e,
+            UiEv::Sleep(e) => {
+                self.ctx.sleeping = e.0;
+                self.set_backlight(!e.0);
+                if !e.0 {
+                    self.request_redraw();
+                }
+                need_redraw = false;
+            }
+            UiEv::Bat(e) => {
+                self.ctx.battery = e;
+                self.request_redraw_region(BATTERY_DIRTY);
+                need_redraw = false;
+            }
             UiEv::Conn(e) => self.ctx.ble_status = e.0.ble,
             UiEv::PeriConn(e) => {
                 if let Some(slot) = self.ctx.peripherals_connected.get_mut(e.id) {
@@ -667,12 +766,15 @@ where
                 if let Some(slot) = self.ctx.peripheral_batteries.get_mut(e.id) {
                     *slot = e.state;
                 }
+                self.request_redraw_region(BATTERY_DIRTY);
+                need_redraw = false;
             }
             UiEv::Central(e) => self.ctx.central_connected = e.connected,
             UiEv::HostDataTick => {
                 self.sync_host_data();
+                self.sync_layer_names();
                 if self.renderer.media_needs_marquee() {
-                    self.request_redraw();
+                    self.request_redraw_region(HEADER_DIRTY);
                 }
                 need_redraw = false;
             }
@@ -749,7 +851,12 @@ impl DisplayRenderer<Rgb565> for QubeStatusRenderer {
         let right = ctx.peripherals_connected.get(1).copied().unwrap_or(false);
         let lp = battery_reading(ctx.peripheral_batteries.first().map(|b| b.0));
         let rp = battery_reading(ctx.peripheral_batteries.get(1).map(|b| b.0));
-        let name = layer_name(ctx.layer);
+        let mut layer_name_buf = crate::layer_names::LayerNameString::new();
+        let name = if crate::layer_names::copy_layer_name(ctx.layer, &mut layer_name_buf) {
+            layer_name_buf.as_str()
+        } else {
+            layer_name(ctx.layer)
+        };
 
         // Header.
         draw_panel(display, SAFE_X, 14, SAFE_W, 28, COL_PANEL, COL_BORDER_DIM);

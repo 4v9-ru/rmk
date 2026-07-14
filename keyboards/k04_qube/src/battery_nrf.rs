@@ -24,15 +24,17 @@ bind_interrupts!(struct SaadcIrqs {
     SAADC => saadc::InterruptHandler;
 });
 
-const MEASURED: i32 = 1564;
-const TOTAL: i32 = 2370;
-const EMPTY_RAW_AT_INPUT: i32 = 3413; // 3.0 V * 1137.8
-const FULL_RAW_AT_INPUT: i32 = 4755; // 4.2 V * 1137.8
+const EMPTY_MV: i32 = 3000;
+const FULL_MV: i32 = 4200;
+// Calibrated from K:04 Qube halves: raw ~= 2520 at 3.150 V and 2600 at 3.281 V.
+const RAW_PER_MV_NUM: i32 = 4;
+const RAW_PER_MV_DEN: i32 = 5;
+const HYSTERESIS_PCT: u8 = 2;
 
 fn percent(val: u16) -> u8 {
     let val = val as i32;
-    let empty = EMPTY_RAW_AT_INPUT * MEASURED / TOTAL;
-    let full = FULL_RAW_AT_INPUT * MEASURED / TOTAL;
+    let empty = EMPTY_MV * RAW_PER_MV_NUM / RAW_PER_MV_DEN;
+    let full = FULL_MV * RAW_PER_MV_NUM / RAW_PER_MV_DEN;
 
     if val >= full {
         100
@@ -45,6 +47,7 @@ fn percent(val: u16) -> u8 {
 
 pub struct K04Battery {
     saadc: Saadc<'static, 1>,
+    level: Option<u8>,
 }
 
 impl K04Battery {
@@ -53,6 +56,17 @@ impl K04Battery {
         let channel = saadc::ChannelConfig::single_ended(pin.degrade_saadc());
         Self {
             saadc: Saadc::new(saadc, SaadcIrqs, saadc::Config::default(), [channel]),
+            level: None,
+        }
+    }
+
+    fn smoothed_percent(&mut self, next: u8) -> u8 {
+        match self.level {
+            Some(current) if next.abs_diff(current) < HYSTERESIS_PCT => current,
+            _ => {
+                self.level = Some(next);
+                next
+            }
         }
     }
 
@@ -88,7 +102,7 @@ impl K04Battery {
         let status = match self.sample_raw().await {
             Some(raw) => BatteryStatus::Available {
                 charge_state: ChargeState::Unknown,
-                level: Some(percent(raw)),
+                level: Some(self.smoothed_percent(percent(raw))),
             },
             None => BatteryStatus::Unavailable,
         };

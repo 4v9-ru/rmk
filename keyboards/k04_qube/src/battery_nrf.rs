@@ -45,31 +45,35 @@ pub struct K04Battery {
 impl K04Battery {
     pub fn new(saadc: Peri<'static, SAADC>, pin: Peri<'static, P0_31>) -> Self {
         interrupt::SAADC.set_priority(interrupt::Priority::P3);
-        let mut channel = saadc::ChannelConfig::single_ended(pin.degrade_saadc());
-        // K:04 uses a high-impedance battery divider. The default 10 us
-        // acquisition can leave the SAADC sample capacitor biased high on
-        // some halves, which shows up as a sticky 100%.
-        channel.time = saadc::Time::_40US;
+        let channel = saadc::ChannelConfig::single_ended(pin.degrade_saadc());
         Self {
             saadc: Saadc::new(saadc, SaadcIrqs, saadc::Config::default(), [channel]),
         }
     }
 
+    async fn read_raw(&mut self) -> Option<u16> {
+        let mut buf = [0i16; 1];
+        with_timeout(Duration::from_millis(200), self.saadc.sample(&mut buf))
+            .await
+            .ok()?;
+        Some(buf[0].max(0) as u16)
+    }
+
     async fn sample_raw(&mut self) -> Option<u16> {
+        // The first conversion after idle can be biased by the SAADC sample
+        // capacitor. Discard it, then let the high-impedance divider settle.
+        self.read_raw().await?;
+        Timer::after(Duration::from_millis(30)).await;
+
         let mut sum = 0u32;
         let mut count = 0u32;
 
-        for index in 0..5 {
-            let mut buf = [0i16; 1];
-            if with_timeout(Duration::from_millis(200), self.saadc.sample(&mut buf))
-                .await
-                .is_ok()
-                && index > 0
-            {
-                sum += buf[0].max(0) as u32;
+        for _ in 0..3 {
+            if let Some(raw) = self.read_raw().await {
+                sum += raw as u32;
                 count += 1;
             }
-            Timer::after(Duration::from_millis(2)).await;
+            Timer::after(Duration::from_millis(30)).await;
         }
 
         (count > 0).then_some((sum / count) as u16)

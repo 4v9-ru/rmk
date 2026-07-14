@@ -1,0 +1,151 @@
+[keyboard]
+name = "Ergohaven K:04 Micro"
+product_name = "K:04 Micro"
+vendor_id = 0xE126
+product_id = 0x0073
+manufacturer = "Ergohaven"
+chip = "nrf52840"
+
+[host]
+# Enable Vial support
+vial_enabled = true
+# Unlock keys: hold simultaneously to unlock Vial config
+unlock_keys = [[0, 4], [0, 3]]
+
+[layout]
+rows = 8
+cols = 6
+layers = 16
+# matrix_map: maps physical (row,col) positions to logical matrix positions
+# Left half rows 0-3, Right half rows 4-7.
+# K04 Micro follows Phenom Micro with the keys under X/C and comma/dot removed.
+matrix_map = """
+(0,4) (0,3) (0,2) (0,1) (0,0)                    (4,0) (4,1) (4,2) (4,3) (4,4)
+(1,4) (1,3) (1,2) (1,1) (1,0)                    (5,0) (5,1) (5,2) (5,3) (5,4)
+(2,4) (2,3) (2,2) (2,1) (2,0) (3,0)    (7,0) (6,0) (6,1) (6,2) (6,3) (6,4)
+                  (3,3) (3,2) (3,1)    (7,1) (7,2) (7,3)
+"""
+
+[[layer]]
+name = "Base"
+# Phenom Micro layout with the keys under X/C and comma/dot removed.
+keys = """
+Q           W           E            R           T     Y     U           I            O           P
+MT(A,LGui)  MT(S,LAlt)  MT(D,LShift) MT(F,LCtrl) G     H     MT(J,RCtrl) MT(K,RShift) MT(L,RAlt) MT(Semicolon,RGui)
+Z           X           C            V           B     _     _           N            M           Comma  Dot  Quote
+                  Backspace MO(1) Space Enter MO(2) Tab
+"""
+# encoders: [central_A1/B1, peripheral_A1/B1]
+encoders = [["AudioVolUp","AudioVolDown"],["AudioVolUp","AudioVolDown"]]
+
+[[layer]]
+name = "Nav"
+# Phenom Micro lower layer, trimmed to the K04 Micro physical layout.
+keys = """
+Kc1            Kc2             Kc3               Kc4           Kc5          Kc6      Kc7          Kc8             Kc9         Kc0
+MT(Home,LGui)  MT(Insert,LAlt)  MT(Delete,LShift) MT(End,LCtrl) Enter        Escape   MT(Left,RCtrl) MT(Down,RShift) MT(Up,RAlt) MT(Right,RGui)
+PageUp         PageDown        _                 _             PrintScreen  _        _            _               _           _        CapsLock CapsWordToggle
+                  _            _            _            _        MO(3) _
+"""
+encoders = [["AudioVolUp","AudioVolDown"],["AudioVolUp","AudioVolDown"]]
+
+[[layer]]
+name = "Symbols"
+# Phenom Micro raise layer. All shifted chars use SHIFTED().
+keys = """
+SHIFTED(Kc2)       SHIFTED(Comma)     Equal            SHIFTED(Dot)        Grave          SHIFTED(Kc6)  SHIFTED(Quote)           SHIFTED(Minus)       Quote                 _
+MT(Backslash,LGui) User41             MT(Minus,LShift) User42              SHIFTED(Equal) SHIFTED(Kc5)  User43                   MT(Semicolon,RShift) User44                    User45
+SHIFTED(Kc3)       SHIFTED(Kc8)       SHIFTED(Semicolon) Slash            _              _            _                        _                   SHIFTED(Backslash)  SHIFTED(Grave) SHIFTED(Kc7) SHIFTED(Kc4)
+                  _              MO(3)           _                  _              _                    _
+"""
+encoders = [["AudioVolUp","AudioVolDown"],["AudioVolUp","AudioVolDown"]]
+
+[[layer]]
+name = "Adjust"
+# Reference layout: function keys on the left, BT/media controls on the right.
+keys = """
+Bootloader  F1             F2              F3              F4   User19  User20                User21              User22            User23
+LGui        MT(F5,LAlt)    MT(F6,LShift)   MT(F7,LCtrl)    F8   User37  MT(AudioVolDown,RCtrl) MT(AudioMute,RShift) MT(AudioVolUp,RAlt) User46
+_           F9             F10             F11             F12  _       _                     User38              MediaPrevTrack    MediaPlayPause  MediaNextTrack User39
+                  _   _    _    _      _      _
+"""
+encoders = [["AudioVolUp","AudioVolDown"],["AudioVolUp","AudioVolDown"]]
+
+[[layer]]
+name = "Pointing"
+# Phenom Micro pointing layer, trimmed to the K04 Micro physical layout.
+keys = """
+_      _          _          _          _      _      _          _          _          _
+User29  MouseBtn3  MouseBtn2  MouseBtn1  User28  User28  MouseBtn1  MouseBtn2  MouseBtn3  User29
+_      _          _          _          User30  _      _          User30     _          _      _  _
+                  _          _          _       _      _          _
+"""
+encoders = [["MouseWheelDown","MouseWheelUp"],["MouseWheelDown","MouseWheelUp"]]
+
+[ble]
+enabled = true
+# Battery ADC: P0_31 (AIN7), voltage divider 1564k/(806k+1564k)
+# DIV = P0.31/AIN7
+battery_adc_pin = "P0_31"
+# LED = P0.30/AIN6 is driven by K04 layer RGB indication
+adc_divider_measured = 782
+adc_divider_total = 1185
+
+[split]
+connection = "ble"
+
+[split.central]
+rows = 4
+cols = 6
+row_offset = 0
+col_offset = 0
+# ble_addr removed — RMK manages addresses from storage automatically
+
+[split.central.matrix]
+# K04 schematic, with R1/top row omitted.
+# R2..R5 = P0.28, P0.03, P1.10, P1.11
+# C1..C6 = P1.06, P1.04, P1.02, P1.00, P0.22, P0.20
+row_pins = ["P0_28", "P0_03", "P1_10", "P1_11"]
+col_pins = ["P1_06", "P1_04", "P1_02", "P1_00", "P0_22", "P0_20"]
+
+[[split.central.input_device.encoder]]
+# v0.0.18: swap A/B to fix encoder direction.
+pin_a = "P0_10"
+pin_b = "P0_09"
+phase = "resolution"
+resolution = 2
+internal_pullup = true
+
+[[split.peripheral]]
+rows = 4
+cols = 6
+row_offset = 4
+col_offset = 0
+# ble_addr removed — RMK manages addresses from storage automatically
+
+[split.peripheral.matrix]
+# K04 schematic, with R1/top row omitted.
+# R2..R5 = P0.28, P0.03, P1.10, P1.11
+# C1..C6 = P1.06, P1.04, P1.02, P1.00, P0.22, P0.20
+row_pins = ["P0_28", "P0_03", "P1_10", "P1_11"]
+col_pins = ["P1_06", "P1_04", "P1_02", "P1_00", "P0_22", "P0_20"]
+
+[[split.peripheral.input_device.encoder]]
+# v0.0.18: swap A/B to fix encoder direction.
+pin_a = "P0_10"
+pin_b = "P0_09"
+phase = "resolution"
+resolution = 2
+internal_pullup = true
+
+[rmk]
+split_peripherals_num = 1
+split_central_sleep_timeout_seconds = 120
+combo_max_num = 32
+morse_max_num = 32
+macro_space_size = 2048
+ble_profiles_num = 5
+
+[storage]
+clear_storage = false
+clear_layout = true

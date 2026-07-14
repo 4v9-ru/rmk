@@ -993,11 +993,10 @@ fn draw_bat<D: DrawTarget<Color = Rgb565>>(
 fn layer_name(layer: u8) -> &'static str {
     match layer {
         0 => "BASE",
-        1 => "GAM",
-        2 => "GFN",
-        3 => "NAV",
-        4 => "SYM",
-        5 => "NUM",
+        1 => "MODE",
+        2 => "DIGITS",
+        3 => "SYSTEM",
+        4 => "MOUSE",
         _ => "?",
     }
 }

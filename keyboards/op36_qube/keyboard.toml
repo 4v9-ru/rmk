@@ -17,6 +17,8 @@ combo_max_num = 32
 morse_max_num = 32
 macro_space_size = 2048
 ble_profiles_num = 5
+mouse_key_interval = 5
+mouse_wheel_interval = 50
 
 # https://rmk.rs/main/docs/configuration/wireless
 # Battery: src/battery_nrf.rs (P0_31, ZMK 1564/2370). No battery_adc_pin here —

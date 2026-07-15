@@ -163,9 +163,5 @@ fn legacy_k04_ble_id(id: u8) -> Option<u8> {
 }
 
 async fn set_preferred_connection(connection_type: ConnectionType) {
-    crate::state::set_preferred_connection(connection_type);
-    #[cfg(feature = "storage")]
-    crate::channel::FLASH_CHANNEL
-        .send(crate::storage::FlashOperationMessage::ConnectionType(connection_type))
-        .await;
+    crate::state::set_preferred_connection_persistent(connection_type).await;
 }

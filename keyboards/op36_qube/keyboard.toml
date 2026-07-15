@@ -13,6 +13,7 @@ unlock_keys = [[0, 4], [0, 3]]
 
 [rmk]
 split_peripherals_num = 2
+split_central_sleep_timeout_seconds = 120
 combo_max_num = 32
 morse_max_num = 32
 macro_space_size = 2048

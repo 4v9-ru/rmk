@@ -118,6 +118,7 @@ internal_pullup = true
 
 [rmk]
 split_peripherals_num = 1
+split_central_sleep_timeout_seconds = 120
 combo_max_num = 32
 morse_max_num = 32
 macro_space_size = 2048

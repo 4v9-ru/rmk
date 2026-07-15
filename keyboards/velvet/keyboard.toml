@@ -93,6 +93,7 @@ col_pins = ["P0_24", "P0_09", "P0_10", "P1_11", "P1_10", "P0_03"]
 
 [rmk]
 split_peripherals_num = 1
+split_central_sleep_timeout_seconds = 120
 combo_max_num = 32
 morse_max_num = 32
 macro_space_size = 2048

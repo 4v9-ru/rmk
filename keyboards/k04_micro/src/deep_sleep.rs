@@ -3,14 +3,17 @@ use rmk::embassy_futures::select::{select3, Either3};
 
 const ROW_WAKE_PINS: &[(u8, usize)] = &[(1, 13), (0, 28), (0, 3), (1, 10), (1, 11)];
 const COL_OUTPUT_PINS: &[(u8, usize)] = &[(1, 6), (1, 4), (1, 2), (1, 0), (0, 22), (0, 20)];
-const WAKE_SETTLE_MS: u64 = 5;
+const WAKE_SETTLE_MS: u64 = 50;
 const ACTIVE_WAKE_RETRY_MS: u64 = 500;
 const SYSTEM_OFF_LED_SETTLE_MS: u64 = 300;
 
 #[embassy_executor::task]
 pub async fn deep_sleep_task() {
     loop {
-        let timeout = crate::vial_settings::sleep_timeout_secs();
+        let Some(timeout) = crate::vial_settings::sleep_timeout_secs() else {
+            crate::vial_settings::wait_settings_change().await;
+            continue;
+        };
         match select3(
             Timer::after_secs(timeout),
             rmk::channel::ACTIVITY_SIGNAL.wait(),
@@ -19,9 +22,9 @@ pub async fn deep_sleep_task() {
         .await
         {
             Either3::First(_) => {
+                rmk::channel::send_controller_event_new(rmk::event::ControllerEvent::SystemOff);
+                Timer::after_millis(SYSTEM_OFF_LED_SETTLE_MS).await;
                 if prepare_matrix_wake().await {
-                    rmk::channel::send_controller_event_new(rmk::event::ControllerEvent::SystemOff);
-                    Timer::after_millis(SYSTEM_OFF_LED_SETTLE_MS).await;
                     enter_system_off();
                 } else {
                     // A held key or noisy wake line would instantly wake SYSTEM OFF.

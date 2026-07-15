@@ -16,7 +16,7 @@ pub const TEXT_AXIS_IDLE_MS: u32 = 30_000;
 pub const TEXT_AXIS_UNLOCK_RATIO: u8 = 8;
 pub const TEXT_AXIS_UNLOCK_DISTANCE: u16 = 600;
 
-const VERSION: u8 = 9;
+const VERSION: u8 = 10;
 pub const SETTINGS_LEN: usize = 43;
 pub const SETTINGS_SYNC_LEN: usize = 27;
 const SETTINGS_STORAGE_LEN: usize = 32;
@@ -26,17 +26,18 @@ const SETTINGS_STORAGE_LEN_V3_LEGACY_29: usize = 29;
 const TOUCH_DPI_BASE: u16 = 400;
 const AUTO_LAYER_TIMEOUT_MS_TABLE: [u32; 6] = [250, 500, 750, 1000, 1250, 1500];
 const ENCODER_INTERVAL_MS_TABLE: [u64; 10] = [0, 5, 10, 15, 20, 30, 40, 60, 80, 100];
-const SLEEP_TIMEOUT_SECONDS_TABLE: [u64; 10] = [
-    10 * 60,
-    15 * 60,
-    20 * 60,
-    30 * 60,
-    45 * 60,
-    60 * 60,
-    2 * 60 * 60,
-    3 * 60 * 60,
-    4 * 60 * 60,
-    5 * 60 * 60,
+const SLEEP_TIMEOUT_SECONDS_TABLE: [Option<u64>; 11] = [
+    None,
+    Some(10 * 60),
+    Some(15 * 60),
+    Some(20 * 60),
+    Some(30 * 60),
+    Some(45 * 60),
+    Some(60 * 60),
+    Some(2 * 60 * 60),
+    Some(3 * 60 * 60),
+    Some(4 * 60 * 60),
+    Some(5 * 60 * 60),
 ];
 
 const IDX_VERSION: usize = 0;
@@ -113,7 +114,7 @@ const DEFAULTS: [u8; SETTINGS_LEN] = {
     data[IDX_AUTO_FLAGS] = 1;
     data[IDX_LED_BRIGHTNESS] = 8;
     data[IDX_LED_TIMEOUT_SEC] = 1;
-    data[IDX_SLEEP_TIMEOUT] = 3;
+    data[IDX_SLEEP_TIMEOUT] = 0;
     data[IDX_AUTO_LAYER_TIMEOUT] = 1;
     data[IDX_LEFT_ENCODER_INTERVAL] = 4;
     data[IDX_RIGHT_ENCODER_INTERVAL] = 4;
@@ -516,10 +517,10 @@ pub fn led_timeout_sec() -> u8 {
 }
 
 pub fn sleep_timeout_index() -> u8 {
-    byte(IDX_SLEEP_TIMEOUT).min(9)
+    byte(IDX_SLEEP_TIMEOUT).min(10)
 }
 
-pub fn sleep_timeout_secs() -> u64 {
+pub fn sleep_timeout_secs() -> Option<u64> {
     SLEEP_TIMEOUT_SECONDS_TABLE[usize::from(sleep_timeout_index())]
 }
 
@@ -617,7 +618,7 @@ pub fn apply_settings_sync_packet(data: &[u8; SETTINGS_SYNC_LEN]) {
     SETTINGS[IDX_RIGHT_BALL_DPI].store(data[4] & 0x0f, Ordering::Relaxed);
     set_touch_gestures_enabled(ModuleSide::Right, (data[4] & (1 << 4)) != 0);
     SETTINGS[IDX_RIGHT_TOUCH_DPI].store((data[5] & 0x0f).min(9), Ordering::Relaxed);
-    SETTINGS[IDX_SLEEP_TIMEOUT].store((data[5] >> 4).min(9), Ordering::Relaxed);
+    SETTINGS[IDX_SLEEP_TIMEOUT].store((data[5] >> 4).min(10), Ordering::Relaxed);
     SETTINGS[IDX_RIGHT_SCROLL_SENS].store(data[6], Ordering::Relaxed);
     SETTINGS[IDX_RIGHT_SNIPER_SENS].store(data[7], Ordering::Relaxed);
     SETTINGS[IDX_RIGHT_TEXT_SENS].store(data[8], Ordering::Relaxed);
@@ -762,7 +763,7 @@ fn set_setting(qsid: u16, data: &[u8]) -> bool {
         316 => set_byte(IDX_LED_BRIGHTNESS, value),
         317 => set_byte(IDX_LED_TIMEOUT_SEC, value),
         318..=322 => set_bt_profile_color_index((qsid - 318) as u8, value.min(24)),
-        323 => set_byte(IDX_SLEEP_TIMEOUT, value.min(9)),
+        323 => set_byte(IDX_SLEEP_TIMEOUT, value.min(10)),
         324 => set_byte(IDX_AUTO_LAYER_TIMEOUT, value.min(5)),
         325 => set_byte(IDX_LEFT_ENCODER_INTERVAL, value.min(9)),
         326 => set_byte(IDX_RIGHT_ENCODER_INTERVAL, value.min(9)),
@@ -944,7 +945,7 @@ fn deserialize(data: &[u8]) {
         i += 1;
     }
     if data.len() >= SETTINGS_STORAGE_LEN_V3_LEGACY_30 {
-        SETTINGS[IDX_SLEEP_TIMEOUT].store((data[29] & 0x0f).min(9), Ordering::Relaxed);
+        SETTINGS[IDX_SLEEP_TIMEOUT].store((data[29] & 0x0f).min(10), Ordering::Relaxed);
         if version == VERSION || version == 8 {
             SETTINGS[IDX_LEFT_ENCODER_INTERVAL].store((data[29] >> 4).min(9), Ordering::Relaxed);
         }

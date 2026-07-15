@@ -1,7 +1,5 @@
 use core::fmt::Debug;
 
-#[cfg(all(feature = "split", feature = "_ble"))]
-use embassy_futures::select::{Either, select};
 use embassy_futures::yield_now;
 #[cfg(feature = "_ble")]
 use embassy_sync::signal::Signal;
@@ -18,8 +16,6 @@ use usbd_hid::descriptor::{MediaKeyboardReport, SystemControlReport};
 
 use crate::channel::send_hid_report;
 use crate::core_traits::Runnable;
-#[cfg(all(feature = "split", feature = "_ble"))]
-use crate::event::ClearPeerEvent;
 use crate::event::{
     ActionEvent, KeyboardEvent, KeyboardEventPos, ModifierEvent, SubscribableEvent, publish_event, publish_event_async,
 };
@@ -54,20 +50,6 @@ pub(crate) static LAST_KEY_TIMESTAMP: Signal<crate::RawMutex, u32> = Signal::new
 /// Led states for the keyboard hid report (its value is received by by the light service in a hid report)
 /// LedIndicator type would be nicer, but that does not have const expr constructor
 pub(crate) static LOCK_LED_STATES: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0u8);
-
-const K04_USER_BT_PROFILE0: u8 = 19;
-const K04_USER_BT_PROFILE1: u8 = 20;
-const K04_USER_BT_PROFILE2: u8 = 21;
-const K04_USER_BT_PROFILE3: u8 = 22;
-const K04_USER_BT_PROFILE4: u8 = 23;
-const K04_USER_BT_NEXT: u8 = 24;
-const K04_USER_BT_PREV: u8 = 25;
-const K04_USER_BT_CLEAR: u8 = 26;
-const K04_USER_BT_TOGGLE: u8 = 27;
-const K04_USER_BT_OUTPUT: u8 = 37;
-const K04_USER_USB_OUTPUT: u8 = 38;
-const K04_USER_BATTERY_LEVEL: u8 = 39;
-const K04_USER_BT_CLEAR_PEER: u8 = 40;
 
 /// Read the current host-driven lock LED state as a typed [`LedIndicator`].
 ///
@@ -1327,7 +1309,7 @@ impl<'a> Keyboard<'a> {
             Action::Light(_light_action) => warn!("Light controll is not supported"),
             Action::KeyboardControl(c) => self.process_action_keyboard_control(c, event).await,
             Action::Special(special_key) => self.process_action_special(special_key, event).await,
-            Action::User(id) => self.process_user(id, event).await,
+            Action::User(_id) => {}
             Action::TriLayerLower => {
                 // Tri-layer lower, turn layer 1 on and update layer state
                 self.process_action_layer_switch(1, event);
@@ -1647,114 +1629,6 @@ impl<'a> Keyboard<'a> {
             self.keymap.set_mouse_buttons(self.mouse.report.buttons);
             self.send_report(Report::MouseReport(report)).await;
             yield_now().await;
-        }
-    }
-
-    async fn process_user(&mut self, id: u8, event: KeyboardEvent) {
-        debug!("Processing user key id: {:?}, event: {:?}", id, event);
-
-        #[cfg(feature = "_ble")]
-        {
-            use crate::NUM_BLE_PROFILE;
-            use crate::ble::profile::BleProfileAction;
-            use crate::channel::BLE_PROFILE_CHANNEL;
-            use rmk_types::connection::ConnectionType;
-
-            let legacy_k04_ble_id = match id {
-                K04_USER_BT_PROFILE0 => Some(0),
-                K04_USER_BT_PROFILE1 => Some(1),
-                K04_USER_BT_PROFILE2 => Some(2),
-                K04_USER_BT_PROFILE3 => Some(3),
-                K04_USER_BT_PROFILE4 => Some(4),
-                K04_USER_BT_NEXT => Some(NUM_BLE_PROFILE as u8),
-                K04_USER_BT_PREV => Some(NUM_BLE_PROFILE as u8 + 1),
-                K04_USER_BT_CLEAR => Some(NUM_BLE_PROFILE as u8 + 2),
-                K04_USER_BT_TOGGLE => Some(NUM_BLE_PROFILE as u8 + 3),
-                K04_USER_BT_CLEAR_PEER => Some(NUM_BLE_PROFILE as u8 + 4),
-                _ => None,
-            };
-            let ble_id = legacy_k04_ble_id.unwrap_or(id);
-
-            if event.pressed {
-                // Clear Peer is processed when pressed
-                if ble_id == NUM_BLE_PROFILE as u8 + 4 {
-                    #[cfg(feature = "split")]
-                    if event.pressed {
-                        // Wait for 5s, if the key is still pressed, clear split peer info
-                        // If there's any other key event received during this period, skip
-                        match select(
-                            embassy_time::Timer::after_millis(5000),
-                            self.keyboard_event_subscriber.next_message_pure(),
-                        )
-                        .await
-                        {
-                            Either::First(_) => {
-                                // Timeout reached, send clear peer message
-                                #[cfg(feature = "split")]
-                                publish_event(ClearPeerEvent);
-                                info!("Clear peer");
-                            }
-                            Either::Second(e) => {
-                                // Received a new key event before timeout, add to unprocessed list
-                                if self.unprocessed_events.push(e).is_err() {
-                                    warn!("Unprocessed event queue is full, dropping event");
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                match id {
-                    K04_USER_BT_OUTPUT => {
-                        crate::state::set_preferred_connection(ConnectionType::Ble);
-                        #[cfg(feature = "storage")]
-                        crate::channel::FLASH_CHANNEL
-                            .send(crate::storage::FlashOperationMessage::ConnectionType(
-                                ConnectionType::Ble,
-                            ))
-                            .await;
-                        return;
-                    }
-                    K04_USER_USB_OUTPUT => {
-                        crate::state::set_preferred_connection(ConnectionType::Usb);
-                        #[cfg(feature = "storage")]
-                        crate::channel::FLASH_CHANNEL
-                            .send(crate::storage::FlashOperationMessage::ConnectionType(
-                                ConnectionType::Usb,
-                            ))
-                            .await;
-                        return;
-                    }
-                    K04_USER_BATTERY_LEVEL => {
-                        #[cfg(all(feature = "split", feature = "_ble"))]
-                        publish_event(crate::event::PeripheralBatteryRefreshEvent);
-                        return;
-                    }
-                    _ => {}
-                }
-
-                // Other user keys are processed when released.
-                // Slots 0..NUM_BLE_PROFILE select a profile directly; the next four are
-                // fixed actions stacked on top.
-                if ble_id < NUM_BLE_PROFILE as u8 {
-                    info!("Switch to profile: {}", ble_id);
-                    BLE_PROFILE_CHANNEL.send(BleProfileAction::Switch(ble_id)).await;
-                } else if ble_id == NUM_BLE_PROFILE as u8 {
-                    // Next profile
-                    BLE_PROFILE_CHANNEL.send(BleProfileAction::Next).await;
-                } else if ble_id == NUM_BLE_PROFILE as u8 + 1 {
-                    // Previous profile
-                    BLE_PROFILE_CHANNEL.send(BleProfileAction::Previous).await;
-                } else if ble_id == NUM_BLE_PROFILE as u8 + 2 {
-                    // Clear bond on current profile
-                    BLE_PROFILE_CHANNEL.send(BleProfileAction::ClearBond).await;
-                } else if ble_id == NUM_BLE_PROFILE as u8 + 3 {
-                    // Toggle preferred transport (USB <-> BLE);
-                    // only meaningful when both transports exist in this build.
-                    #[cfg(not(feature = "_no_usb"))]
-                    crate::state::toggle_preferred().await;
-                }
-            }
         }
     }
 

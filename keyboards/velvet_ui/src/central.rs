@@ -17,4 +17,9 @@ mod keyboard_central {
     fn pointing_mode() -> crate::pointing_mode::VelvetUiPointingMode {
         crate::pointing_mode::VelvetUiPointingMode::new()
     }
+
+    #[register_processor(poll)]
+    fn ergohaven_user_keys() -> ::rmk::processor::builtin::ergohaven::ErgohavenUserKeys {
+        ::rmk::processor::builtin::ergohaven::ErgohavenUserKeys::new()
+    }
 }

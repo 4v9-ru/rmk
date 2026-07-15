@@ -22,6 +22,11 @@ mod keyboard_central {
     }
 
     #[register_processor(poll)]
+    fn ergohaven_user_keys() -> ::rmk::processor::builtin::ergohaven::ErgohavenUserKeys {
+        ::rmk::processor::builtin::ergohaven::ErgohavenUserKeys::new()
+    }
+
+    #[register_processor(poll)]
     fn pointing_processor() -> ::rmk::input_device::pointing::QubePointingModeProcessor<'static> {
         ::rmk::input_device::pointing::QubePointingModeProcessor::new(&keymap)
     }

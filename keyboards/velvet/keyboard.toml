@@ -61,10 +61,6 @@ _   _  F9  F10  F11  F12  OutputUsb  MediaPrevTrack  MediaPlayPause  MediaNextTr
 
 [ble]
 enabled = true
-# Battery ADC: P0_31 (AIN7), voltage divider 1564k/(806k+1564k)
-battery_adc_pin = "P0_31"
-adc_divider_measured = 782
-adc_divider_total = 1185
 
 [split]
 connection = "ble"
@@ -84,8 +80,6 @@ rows = 4
 cols = 6
 row_offset = 4
 col_offset = 0
-# Note: battery_adc_pin for peripheral requires upstream RMK (not yet in crates.io 0.8.2)
-# Peripheral battery level will show 0% until RMK 0.9 release
 
 [split.peripheral.matrix]
 row_pins = ["P1_13", "P0_02", "P0_29", "P0_30"]

@@ -81,10 +81,6 @@ encoders = [["AudioVolUp","AudioVolDown"],["AudioVolUp","AudioVolDown"],["AudioV
 
 [ble]
 enabled = true
-# Battery ADC: P0_31 (AIN7), voltage divider 1564k/(806k+1564k)
-battery_adc_pin = "P0_31"
-adc_divider_measured = 782
-adc_divider_total = 1185
 
 [split]
 connection = "ble"

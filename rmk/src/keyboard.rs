@@ -1726,6 +1726,7 @@ impl<'a> Keyboard<'a> {
                         return;
                     }
                     K04_USER_BATTERY_LEVEL => {
+                        #[cfg(all(feature = "split", feature = "_ble"))]
                         publish_event(crate::event::PeripheralBatteryRefreshEvent);
                         return;
                     }

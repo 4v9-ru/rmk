@@ -54,9 +54,6 @@ User7   User8
 
 [ble]
 enabled = true
-battery_adc_pin = "P0_31"
-adc_divider_measured = 782
-adc_divider_total = 1185
 
 [matrix]
 matrix_type = "direct_pin"

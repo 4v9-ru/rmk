@@ -73,9 +73,6 @@ encoders = [["AudioVolUp","AudioVolDown"],["AudioVolUp","AudioVolDown"]]
 
 [ble]
 enabled = true
-battery_adc_pin = "P0_31"
-adc_divider_measured = 782
-adc_divider_total = 1185
 
 [split]
 connection = "ble"

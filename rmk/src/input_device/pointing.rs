@@ -5,17 +5,19 @@ use embedded_hal::digital::InputPin;
 use embedded_hal_async::digital::Wait;
 use futures::future::pending;
 use rmk_macro::{input_device, processor};
-use rmk_types::action::Action;
 use rmk_types::keycode::HidKeyCode;
 use usbd_hid::descriptor::MouseReport;
 
 use crate::channel::send_hid_report;
 use crate::event::{
-    ActionEvent, Axis, AxisEvent, AxisValType, KeyboardEvent, PeripheralSettingsEvent,
-    PointingEvent, PointingProcessorEvent, PointingSetCpiEvent,
+    Axis, AxisEvent, AxisValType, PointingEvent, PointingProcessorEvent, PointingSetCpiEvent,
 };
+#[cfg(feature = "split")]
+use crate::event::{ActionEvent, KeyboardEvent, PeripheralSettingsEvent};
 use crate::hid::{KeyboardReport, Report};
 use crate::keymap::KeyMap;
+#[cfg(feature = "split")]
+use rmk_types::action::Action;
 
 pub const ALL_POINTING_DEVICES: u8 = 255;
 
@@ -806,6 +808,7 @@ impl QubePointingSideState {
 ///
 /// Qube receives standard `PointingEvent`s from the halves over the existing
 /// split path, then applies the K:04 pointing mode user keys on the central.
+#[cfg(feature = "split")]
 #[processor(
     subscribe = [PointingEvent, ActionEvent, KeyboardEvent, PeripheralSettingsEvent],
     poll_interval = 50
@@ -819,6 +822,7 @@ pub struct QubePointingModeProcessor<'a> {
     last_auto_motion_ms: u32,
 }
 
+#[cfg(feature = "split")]
 impl<'a> QubePointingModeProcessor<'a> {
     pub fn new(keymap: &'a KeyMap<'a>) -> Self {
         Self {
@@ -1202,7 +1206,10 @@ impl<'a> PointingProcessor<'a> {
 
     /// Set the pointing mode
     pub fn set_pointing_mode(&mut self, mode: PointingMode) -> &mut Self {
-        self.current_mode = mode;
+        if self.current_mode != mode {
+            self.accumulator.reset();
+            self.current_mode = mode;
+        }
         self
     }
 

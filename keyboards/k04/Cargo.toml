@@ -16,7 +16,7 @@ usb_debug = ["rmk/usb_log"]
 usb_debug_force_ble = ["usb_debug"]
 
 [dependencies]
-rmk = { path = "../../common/rmk-main-upstream/rmk", default-features = false, features = [
+rmk = { path = "../../rmk", default-features = false, features = [
     "usb_log",
     "storage",
     "vial",

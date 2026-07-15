@@ -55,6 +55,19 @@ pub(crate) static LAST_KEY_TIMESTAMP: Signal<crate::RawMutex, u32> = Signal::new
 /// LedIndicator type would be nicer, but that does not have const expr constructor
 pub(crate) static LOCK_LED_STATES: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0u8);
 
+const K04_USER_BT_PROFILE0: u8 = 19;
+const K04_USER_BT_PROFILE1: u8 = 20;
+const K04_USER_BT_PROFILE2: u8 = 21;
+const K04_USER_BT_PROFILE3: u8 = 22;
+const K04_USER_BT_PROFILE4: u8 = 23;
+const K04_USER_BT_NEXT: u8 = 24;
+const K04_USER_BT_PREV: u8 = 25;
+const K04_USER_BT_CLEAR: u8 = 26;
+const K04_USER_BT_TOGGLE: u8 = 27;
+const K04_USER_BT_OUTPUT: u8 = 37;
+const K04_USER_USB_OUTPUT: u8 = 38;
+const K04_USER_BT_CLEAR_PEER: u8 = 40;
+
 /// Read the current host-driven lock LED state as a typed [`LedIndicator`].
 ///
 /// Updated by `run_led_reader` whenever the host sends a SET_REPORT for LEDs;
@@ -1644,9 +1657,26 @@ impl<'a> Keyboard<'a> {
             use crate::NUM_BLE_PROFILE;
             use crate::ble::profile::BleProfileAction;
             use crate::channel::BLE_PROFILE_CHANNEL;
+            use rmk_types::connection::ConnectionType;
+
+            let legacy_k04_ble_id = match id {
+                K04_USER_BT_PROFILE0 => Some(0),
+                K04_USER_BT_PROFILE1 => Some(1),
+                K04_USER_BT_PROFILE2 => Some(2),
+                K04_USER_BT_PROFILE3 => Some(3),
+                K04_USER_BT_PROFILE4 => Some(4),
+                K04_USER_BT_NEXT => Some(NUM_BLE_PROFILE as u8),
+                K04_USER_BT_PREV => Some(NUM_BLE_PROFILE as u8 + 1),
+                K04_USER_BT_CLEAR => Some(NUM_BLE_PROFILE as u8 + 2),
+                K04_USER_BT_TOGGLE => Some(NUM_BLE_PROFILE as u8 + 3),
+                K04_USER_BT_CLEAR_PEER => Some(NUM_BLE_PROFILE as u8 + 4),
+                _ => None,
+            };
+            let ble_id = legacy_k04_ble_id.unwrap_or(id);
+
             if event.pressed {
                 // Clear Peer is processed when pressed
-                if id == NUM_BLE_PROFILE as u8 + 4 {
+                if ble_id == NUM_BLE_PROFILE as u8 + 4 {
                     #[cfg(feature = "split")]
                     if event.pressed {
                         // Wait for 5s, if the key is still pressed, clear split peer info
@@ -1673,22 +1703,42 @@ impl<'a> Keyboard<'a> {
                     }
                 }
             } else {
+                match id {
+                    K04_USER_BT_OUTPUT => {
+                        crate::state::set_preferred_connection(ConnectionType::Ble);
+                        #[cfg(feature = "storage")]
+                        crate::channel::FLASH_CHANNEL
+                            .send(crate::storage::FlashOperationMessage::ConnectionType(ConnectionType::Ble))
+                            .await;
+                        return;
+                    }
+                    K04_USER_USB_OUTPUT => {
+                        crate::state::set_preferred_connection(ConnectionType::Usb);
+                        #[cfg(feature = "storage")]
+                        crate::channel::FLASH_CHANNEL
+                            .send(crate::storage::FlashOperationMessage::ConnectionType(ConnectionType::Usb))
+                            .await;
+                        return;
+                    }
+                    _ => {}
+                }
+
                 // Other user keys are processed when released.
                 // Slots 0..NUM_BLE_PROFILE select a profile directly; the next four are
                 // fixed actions stacked on top.
-                if id < NUM_BLE_PROFILE as u8 {
-                    info!("Switch to profile: {}", id);
-                    BLE_PROFILE_CHANNEL.send(BleProfileAction::Switch(id)).await;
-                } else if id == NUM_BLE_PROFILE as u8 {
+                if ble_id < NUM_BLE_PROFILE as u8 {
+                    info!("Switch to profile: {}", ble_id);
+                    BLE_PROFILE_CHANNEL.send(BleProfileAction::Switch(ble_id)).await;
+                } else if ble_id == NUM_BLE_PROFILE as u8 {
                     // Next profile
                     BLE_PROFILE_CHANNEL.send(BleProfileAction::Next).await;
-                } else if id == NUM_BLE_PROFILE as u8 + 1 {
+                } else if ble_id == NUM_BLE_PROFILE as u8 + 1 {
                     // Previous profile
                     BLE_PROFILE_CHANNEL.send(BleProfileAction::Previous).await;
-                } else if id == NUM_BLE_PROFILE as u8 + 2 {
+                } else if ble_id == NUM_BLE_PROFILE as u8 + 2 {
                     // Clear bond on current profile
                     BLE_PROFILE_CHANNEL.send(BleProfileAction::ClearBond).await;
-                } else if id == NUM_BLE_PROFILE as u8 + 3 {
+                } else if ble_id == NUM_BLE_PROFILE as u8 + 3 {
                     // Toggle preferred transport (USB <-> BLE);
                     // only meaningful when both transports exist in this build.
                     #[cfg(not(feature = "_no_usb"))]

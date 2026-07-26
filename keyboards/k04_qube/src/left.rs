@@ -15,7 +15,7 @@ mod keyboard_peripheral {
         TWISPI1 => ::embassy_nrf::twim::InterruptHandler<::embassy_nrf::peripherals::TWISPI1>;
     );
 
-    #[register_processor(event)]
+    #[register_processor(poll)]
     fn layer_led() -> crate::layer_led::LayerLed {
         let mut config = ::embassy_nrf::pwm::Config::default();
         config.prescaler = ::embassy_nrf::pwm::Prescaler::Div1;
@@ -30,7 +30,7 @@ mod keyboard_peripheral {
         crate::module_settings::ModuleSettingsSync::new()
     }
 
-    #[register_processor(poll)]
+    #[register_processor(event)]
     fn trackball() -> crate::trackball::Trackball {
         crate::trackball::Trackball::new(
             crate::trackball::new_trackball_from_pins(0, p.P0_01, p.P0_00, p.P0_05, p.P1_09),

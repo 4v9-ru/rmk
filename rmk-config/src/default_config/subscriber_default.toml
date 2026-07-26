@@ -63,6 +63,9 @@ events = [
     { name = "led_indicator" },
     # split/driver.rs: LayerChangeEvent::subscriber()
     { name = "layer_change" },
+    # split/driver.rs: PeripheralSettingsEvent::subscriber()
+    # Covers up to 2 peripherals; for 3+ peripherals override subs in keyboard.toml
+    { name = "peripheral_settings", count = 2 },
     # split/driver.rs: ConnectionStatusChangeEvent::subscriber()
     # Covers up to 2 peripherals; for 3+ peripherals override subs in keyboard.toml
     { name = "connection_status_change", count = 2 },
@@ -73,8 +76,13 @@ events = [
 [[subscriber]]
 features = ["split", "_ble"]
 events = [
+    # split/driver.rs: each PeripheralManager syncs host advertising mode
+    # Covers up to 2 peripherals; for 3+ peripherals override subs in keyboard.toml
+    { name = "ble_advertising_mode", count = 2 },
     # split/ble/peripheral.rs: KeyboardEvent::subscriber() (temporary, on timeout)
     { name = "keyboard" },
+    # split/ble/peripheral.rs: PointingEvent::subscriber() (temporary, on timeout)
+    { name = "pointing" },
     # split/peripheral.rs: ChargingStateEvent::subscriber() (cfg _ble)
     { name = "charging_state" },
     # split/peripheral.rs: BatteryStatusEvent::subscriber() (cfg _ble)

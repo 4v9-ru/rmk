@@ -4,7 +4,7 @@ use rmk::event::PeripheralSettingsEvent;
 use rmk::macros::processor;
 
 const VERSION: u8 = 9;
-const SETTINGS_LEN: usize = 43;
+const SETTINGS_LEN: usize = 45;
 const TOUCH_DPI_BASE: u16 = 400;
 
 const IDX_LEFT_MODE: usize = 1;
@@ -29,8 +29,12 @@ const IDX_AUTO_FLAGS: usize = 19;
 const IDX_LED_BRIGHTNESS: usize = 20;
 const IDX_LED_TIMEOUT_SEC: usize = 21;
 const IDX_LAYER_COLORS_PACKED: usize = 22;
+const IDX_BT_PROFILE_COLORS: usize = 32;
 const IDX_MODULE_SELECT: usize = 39;
 const IDX_AXIS_FLAGS: usize = 42;
+const IDX_LEFT_ENCODER_STEPS: usize = 43;
+const IDX_RIGHT_ENCODER_STEPS: usize = 44;
+const AUTO_FLAG_CHARGE_INDICATOR_DISABLED: u8 = 1 << 6;
 
 const BALL_DPI_TABLE: [u16; 16] = [
     200, 400, 600, 800, 1000, 1200, 1400, 1600, 1800, 2000, 2200, 2400, 2600, 2800, 3000, 3200,
@@ -63,8 +67,25 @@ pub fn led_brightness() -> u8 {
     byte(IDX_LED_BRIGHTNESS)
 }
 
+pub fn charge_indicator_enabled() -> bool {
+    byte(IDX_AUTO_FLAGS) & AUTO_FLAG_CHARGE_INDICATOR_DISABLED == 0
+}
+
+pub fn led_timeout_sec() -> u8 {
+    byte(IDX_LED_TIMEOUT_SEC)
+}
+
 pub fn layer_color(layer: u8) -> Rgb {
     palette(layer_color_index(layer))
+}
+
+pub fn bt_profile_color(profile: u8) -> Rgb {
+    let index = if profile < 5 {
+        byte(IDX_BT_PROFILE_COLORS + usize::from(profile)).min(24)
+    } else {
+        1
+    };
+    palette(index)
 }
 
 pub fn ball_cpi(side: u8) -> u16 {
@@ -87,7 +108,25 @@ pub fn scale_touch_delta(value: i16, side: u8) -> i16 {
     scaled.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
 }
 
-fn apply_settings_packet(data: &[u8; 27]) {
+pub(crate) fn apply_settings_packet(data: &[u8; 27]) {
+    if data[0] == VERSION | 0x40 {
+        ensure_initialized();
+        let left_steps = data[1].min(7);
+        let right_steps = data[2].min(7);
+        SETTINGS[IDX_LEFT_ENCODER_STEPS].store(left_steps, Ordering::Relaxed);
+        SETTINGS[IDX_RIGHT_ENCODER_STEPS].store(right_steps, Ordering::Relaxed);
+        rmk::input_device::rotary_encoder::set_encoder_steps(0, left_steps + 1);
+        rmk::input_device::rotary_encoder::set_encoder_steps(1, right_steps + 1);
+        return;
+    }
+    if data[0] == VERSION | 0x80 {
+        let mut profile = 0usize;
+        while profile < 5 {
+            SETTINGS[IDX_BT_PROFILE_COLORS + profile].store(data[1 + profile].min(24), Ordering::Relaxed);
+            profile += 1;
+        }
+        return;
+    }
     if data[0] != VERSION {
         return;
     }
@@ -139,6 +178,11 @@ fn ensure_initialized() {
     SETTINGS[IDX_RIGHT_SNIPER_SENS].store(4, Ordering::Relaxed);
     SETTINGS[IDX_RIGHT_TEXT_SENS].store(16, Ordering::Relaxed);
     SETTINGS[IDX_LED_BRIGHTNESS].store(8, Ordering::Relaxed);
+    SETTINGS[IDX_LED_TIMEOUT_SEC].store(1, Ordering::Relaxed);
+    SETTINGS[IDX_LEFT_ENCODER_STEPS].store(0, Ordering::Relaxed);
+    SETTINGS[IDX_RIGHT_ENCODER_STEPS].store(0, Ordering::Relaxed);
+    rmk::input_device::rotary_encoder::set_encoder_steps(0, 1);
+    rmk::input_device::rotary_encoder::set_encoder_steps(1, 1);
     set_layer_color_index(0, 0);
     set_layer_color_index(1, 2);
     set_layer_color_index(2, 16);
@@ -155,6 +199,11 @@ fn ensure_initialized() {
     set_layer_color_index(13, 23);
     set_layer_color_index(14, 3);
     set_layer_color_index(15, 17);
+    SETTINGS[IDX_BT_PROFILE_COLORS].store(2, Ordering::Relaxed);
+    SETTINGS[IDX_BT_PROFILE_COLORS + 1].store(16, Ordering::Relaxed);
+    SETTINGS[IDX_BT_PROFILE_COLORS + 2].store(6, Ordering::Relaxed);
+    SETTINGS[IDX_BT_PROFILE_COLORS + 3].store(8, Ordering::Relaxed);
+    SETTINGS[IDX_BT_PROFILE_COLORS + 4].store(19, Ordering::Relaxed);
 }
 
 fn byte(idx: usize) -> u8 {

@@ -56,6 +56,8 @@ mod state;
 
 pub use action::ActionEvent;
 pub use battery::{BatteryAdcEvent, BatteryStatusEvent, ChargingStateEvent};
+#[cfg(feature = "_ble")]
+pub use connection::{BleAdvertisingMode, BleAdvertisingModeEvent};
 pub use connection::{ConnectionStatus, ConnectionStatusChangeEvent, ConnectionType};
 #[cfg(feature = "dfu")]
 pub use dfu::DfuStatusEvent;
@@ -64,7 +66,10 @@ pub use input::{
     PointingProcessorEvent, PointingSetCpiEvent, RotaryEncoderPos,
 };
 #[cfg(feature = "split")]
-pub use split::{CentralConnectedEvent, PeripheralConnectedEvent, PeripheralSettingsEvent};
+pub use split::{
+    CentralConnectedEvent, PeripheralConnectedEvent, PeripheralSettingsEvent, SplitConnectionState,
+    SplitConnectionStateEvent,
+};
 #[cfg(all(feature = "split", feature = "_ble"))]
 pub use split::{ClearPeerEvent, PeripheralBatteryEvent, PeripheralBatteryRefreshEvent};
 pub use state::{LayerChangeEvent, LedIndicatorEvent, SleepStateEvent, WpmUpdateEvent};

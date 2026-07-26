@@ -1,24 +1,27 @@
-use core::cell::RefCell;
-use core::sync::atomic::Ordering;
+use core::cell::{Cell, RefCell};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use bt_hci::cmd::le::{LeReadLocalSupportedFeatures, LeSetPhy, LeSetScanParams};
 use bt_hci::controller::{ControllerCmdAsync, ControllerCmdSync};
 use embassy_futures::select::{Either, Either3, select, select3};
+use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
-use embassy_time::{Duration, Timer, with_timeout};
+use embassy_time::{Duration, Instant, Timer, with_timeout};
 use heapless::VecView;
 use trouble_host::prelude::*;
 
-use crate::SPLIT_CENTRAL_SLEEP_TIMEOUT_SECONDS;
 use crate::ble::{SLEEPING_STATE, update_ble_phy, update_conn_params};
 use crate::channel::FLASH_CHANNEL;
-use crate::event::{PeripheralConnectedEvent, SleepStateEvent, publish_event};
+use crate::event::{
+    PeripheralConnectedEvent, SleepStateEvent, SplitConnectionState, SplitConnectionStateEvent, publish_event,
+};
 #[cfg(feature = "storage")]
 use crate::split::ble::PeerAddress;
 use crate::split::driver::{PeripheralManager, SplitDriverError, SplitReader, SplitWriter};
 use crate::split::{SPLIT_MESSAGE_MAX_SIZE, SplitMessage};
 use crate::storage::FlashOperationMessage;
+use crate::{SPLIT_CENTRAL_SLEEP_TIMEOUT_SECONDS, SPLIT_PAIRING_TIMEOUT_SECONDS};
 
 pub(crate) static STACK_STARTED: Signal<crate::RawMutex, bool> = Signal::new();
 pub(crate) static PERIPHERAL_FOUND: Signal<crate::RawMutex, (u8, BdAddr)> = Signal::new();
@@ -27,13 +30,178 @@ pub(crate) static PERIPHERAL_FOUND: Signal<crate::RawMutex, (u8, BdAddr)> = Sign
 static START_SCANNING: Signal<crate::RawMutex, ()> = Signal::new();
 static STOP_SCANNING: Signal<crate::RawMutex, ()> = Signal::new();
 static SCANNING_MUTEX: Mutex<crate::RawMutex, ()> = Mutex::new(());
+static UNCOMMITTED_PEER_CANDIDATES: BlockingMutex<crate::RawMutex, Cell<u32>> = BlockingMutex::new(Cell::new(0));
+static CONNECTED_PERIPHERALS: AtomicU32 = AtomicU32::new(0);
+static PERIPHERAL_CONNECTION_CHANGED: Signal<crate::RawMutex, ()> = Signal::new();
+static SPLIT_WINDOW_RESTART: Signal<crate::RawMutex, u32> = Signal::new();
+static SPLIT_WINDOW_DONE: Signal<crate::RawMutex, u32> = Signal::new();
+static SPLIT_WINDOW_GENERATION: AtomicU32 = AtomicU32::new(0);
 
-/// Sleep management signal for BLE Split Central
+static LAST_ACTIVITY_MS: AtomicU32 = AtomicU32::new(0);
+static SPLIT_SLEEP_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+const SPLIT_ACTIVE_WINDOW_MS: u32 = 2_000;
+const SPLIT_POWER_POLL_MS: u64 = 100;
+
+const SPLIT_SERVICE_UUID: [u8; 16] = [70, 153, 101, 152, 54, 53, 10, 191, 7, 75, 229, 24, 170, 251, 213, 77];
+const SPLIT_COMPANY_ID: u16 = 0xe118;
+
+fn required_peripheral_mask() -> u32 {
+    if crate::SPLIT_PERIPHERALS_NUM >= u32::BITS as usize {
+        u32::MAX
+    } else {
+        (1u32 << crate::SPLIT_PERIPHERALS_NUM) - 1
+    }
+}
+
+fn all_peripherals_connected() -> bool {
+    CONNECTED_PERIPHERALS.load(Ordering::Acquire) & required_peripheral_mask() == required_peripheral_mask()
+}
+
+fn publish_peripheral_connection(id: usize, connected: bool) {
+    let bit = bit_for_peri(id);
+    if connected {
+        CONNECTED_PERIPHERALS.fetch_or(bit, Ordering::AcqRel);
+    } else {
+        CONNECTED_PERIPHERALS.fetch_and(!bit, Ordering::AcqRel);
+    }
+    publish_event(PeripheralConnectedEvent { id, connected });
+    PERIPHERAL_CONNECTION_CHANGED.signal(());
+}
+
+fn publish_split_connection_state(state: SplitConnectionState, generation: u32, terminal: bool) {
+    publish_event(SplitConnectionStateEvent(state));
+    if terminal {
+        SPLIT_WINDOW_DONE.signal(generation);
+    }
+}
+
+/// Supervise the complete split-link search window.
 ///
-/// This signal serves dual purposes for sleep management:
-/// - `signal(true)`: Indicates central has entered sleep mode
-/// - `signal(false)`: Indicates activity detected, wake up or reset sleep timer
-pub(crate) static CENTRAL_SLEEP: Signal<crate::RawMutex, bool> = Signal::new();
+/// Peripheral managers keep reconnecting in the background, while this task
+/// owns the visible `Searching -> Connected/Idle` state and its timeout.
+pub async fn run_split_connection_supervisor() {
+    let timeout = Duration::from_secs(u64::from(SPLIT_PAIRING_TIMEOUT_SECONDS));
+    let mut generation = SPLIT_WINDOW_GENERATION.load(Ordering::Acquire);
+    let mut state = if all_peripherals_connected() {
+        SplitConnectionState::Connected
+    } else {
+        SplitConnectionState::Searching
+    };
+    let mut deadline = Instant::now() + timeout;
+    publish_split_connection_state(state, generation, state == SplitConnectionState::Connected);
+
+    loop {
+        match state {
+            SplitConnectionState::Searching if SPLIT_PAIRING_TIMEOUT_SECONDS == 0 => {
+                match select(PERIPHERAL_CONNECTION_CHANGED.wait(), SPLIT_WINDOW_RESTART.wait()).await {
+                    Either::First(()) => {
+                        if all_peripherals_connected() {
+                            state = SplitConnectionState::Connected;
+                            publish_split_connection_state(state, generation, true);
+                        }
+                    }
+                    Either::Second(next_generation) => {
+                        generation = next_generation;
+                        state = if all_peripherals_connected() {
+                            SplitConnectionState::Connected
+                        } else {
+                            SplitConnectionState::Searching
+                        };
+                        publish_split_connection_state(state, generation, state == SplitConnectionState::Connected);
+                    }
+                }
+            }
+            SplitConnectionState::Searching => {
+                match select3(
+                    PERIPHERAL_CONNECTION_CHANGED.wait(),
+                    SPLIT_WINDOW_RESTART.wait(),
+                    Timer::at(deadline),
+                )
+                .await
+                {
+                    Either3::First(()) => {
+                        if all_peripherals_connected() {
+                            state = SplitConnectionState::Connected;
+                            publish_split_connection_state(state, generation, true);
+                        }
+                    }
+                    Either3::Second(next_generation) => {
+                        generation = next_generation;
+                        deadline = Instant::now() + timeout;
+                        state = if all_peripherals_connected() {
+                            SplitConnectionState::Connected
+                        } else {
+                            SplitConnectionState::Searching
+                        };
+                        publish_split_connection_state(state, generation, state == SplitConnectionState::Connected);
+                    }
+                    Either3::Third(()) => {
+                        state = SplitConnectionState::Idle;
+                        publish_split_connection_state(state, generation, true);
+                    }
+                }
+            }
+            SplitConnectionState::Connected => {
+                match select(PERIPHERAL_CONNECTION_CHANGED.wait(), SPLIT_WINDOW_RESTART.wait()).await {
+                    Either::First(()) => {
+                        if !all_peripherals_connected() {
+                            state = SplitConnectionState::Searching;
+                            deadline = Instant::now() + timeout;
+                            publish_split_connection_state(state, generation, false);
+                        }
+                    }
+                    Either::Second(next_generation) => {
+                        generation = next_generation;
+                        if all_peripherals_connected() {
+                            publish_split_connection_state(state, generation, true);
+                        } else {
+                            state = SplitConnectionState::Searching;
+                            deadline = Instant::now() + timeout;
+                            publish_split_connection_state(state, generation, false);
+                        }
+                    }
+                }
+            }
+            SplitConnectionState::Idle => {
+                match select(PERIPHERAL_CONNECTION_CHANGED.wait(), SPLIT_WINDOW_RESTART.wait()).await {
+                    Either::First(()) => {
+                        if all_peripherals_connected() {
+                            state = SplitConnectionState::Connected;
+                            publish_split_connection_state(state, generation, true);
+                        }
+                    }
+                    Either::Second(next_generation) => {
+                        generation = next_generation;
+                        deadline = Instant::now() + timeout;
+                        state = if all_peripherals_connected() {
+                            SplitConnectionState::Connected
+                        } else {
+                            SplitConnectionState::Searching
+                        };
+                        publish_split_connection_state(state, generation, state == SplitConnectionState::Connected);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Start a fresh split acquisition phase and wait for either all peripherals
+/// or the configured split timeout.
+pub(crate) async fn wait_for_split_connection_window() {
+    if SPLIT_PAIRING_TIMEOUT_SECONDS == 0 || all_peripherals_connected() {
+        return;
+    }
+
+    let generation = SPLIT_WINDOW_GENERATION.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+    SPLIT_WINDOW_RESTART.signal(generation);
+    loop {
+        if SPLIT_WINDOW_DONE.wait().await == generation {
+            return;
+        }
+    }
+}
 
 /// Gatt service used in split central to send split message to peripheral
 #[gatt_service(uuid = "4dd5fbaa-18e5-4b07-bf0a-353698659946")]
@@ -95,26 +263,19 @@ pub async fn scan_peripherals<
                         continue;
                     }
 
-                    info!("Scanned new peripheral {:?}", scanned_addr);
+                    info!("Scanned split peripheral {:?}", scanned_addr);
                     let mut slot_updated = false;
                     if let Some(slot) = addrs.borrow_mut().get_mut(found_peripheral_id as usize)
                         && slot.is_none()
                     {
-                        // Update only when the slot is empty
                         *slot = Some(scanned_addr);
                         slot_updated = true;
                     }
 
-                    // Update stored addr.
-                    // This cannot be put inside the `addrs.borrow_mut()` block because the sending is async
+                    // Do not persist a scanned address until the GATT product-id
+                    // handshake proves that it belongs to this keyboard model.
                     if slot_updated {
-                        FLASH_CHANNEL
-                            .send(FlashOperationMessage::PeerAddress(PeerAddress::new(
-                                found_peripheral_id,
-                                true,
-                                scanned_addr,
-                            )))
-                            .await;
+                        mark_uncommitted_peer_candidate(found_peripheral_id as usize);
                     }
 
                     if addrs.borrow().iter().all(|a| a.is_some()) {
@@ -137,26 +298,120 @@ pub(crate) struct ScanHandler {}
 impl EventHandler for ScanHandler {
     fn on_adv_reports(&self, mut it: LeAdvReportsIter<'_>) {
         while let Some(Ok(report)) = it.next() {
-            // Check advertisement data
-            if report.data.len() < 25 {
-                continue;
-            }
-            if report.data[4] == 0x07
-                && report.data[5..].starts_with(&[
-                    // uuid: 4dd5fbaa-18e5-4b07-bf0a-353698659946
-                    70u8, 153u8, 101u8, 152u8, 54u8, 53u8, 10u8, 191u8, 7u8, 75u8, 229u8, 24u8, 170u8, 251u8, 213u8,
-                    77u8,
-                ])
-                && report.data[21..25] == [0x04, 0xff, 0x18, 0xe1]
+            if let Some(peripheral_id) = split_peripheral_id_from_advertisement(report.data)
+                .or_else(|| legacy_split_peripheral_id_from_advertisement(report.data))
             {
-                // Uuid and manufacturer specific data check passed
-                let peripheral_id = report.data[25];
                 info!("Found split peripheral: id={:?}, addr={:?}", peripheral_id, report.addr);
                 PERIPHERAL_FOUND.signal((peripheral_id, report.addr));
                 break;
             }
         }
     }
+}
+
+// Migration compatibility for the previous upstream/Qube advertisement,
+// which carried only the peripheral id. Product identity is still verified
+// by the GATT handshake before the address is persisted.
+fn legacy_split_peripheral_id_from_advertisement(data: &[u8]) -> Option<u8> {
+    if data.len() > 25
+        && data[4] == 0x07
+        && data[5..].starts_with(&SPLIT_SERVICE_UUID)
+        && data[21..25] == [0x04, 0xff, 0x18, 0xe1]
+    {
+        Some(data[25])
+    } else {
+        None
+    }
+}
+
+fn split_peripheral_id_from_advertisement(data: &[u8]) -> Option<u8> {
+    let mut has_split_service = false;
+    let mut matching_product_peripheral_id = None;
+    let mut offset = 0usize;
+
+    while offset < data.len() {
+        let len = data[offset] as usize;
+        if len == 0 {
+            break;
+        }
+        let end = offset + 1 + len;
+        if end > data.len() || len < 1 {
+            break;
+        }
+
+        let ad_type = data[offset + 1];
+        let payload = &data[offset + 2..end];
+        match ad_type {
+            0x07 if payload == SPLIT_SERVICE_UUID => {
+                has_split_service = true;
+            }
+            0xff if payload.len() >= 5 => {
+                let company_id = u16::from_le_bytes([payload[0], payload[1]]);
+                let product_id = u16::from_le_bytes([payload[2], payload[3]]);
+                if company_id == SPLIT_COMPANY_ID && product_id == crate::SPLIT_PRODUCT_ID {
+                    matching_product_peripheral_id = Some(payload[4]);
+                }
+            }
+            _ => {}
+        }
+
+        offset = end;
+    }
+
+    has_split_service.then_some(matching_product_peripheral_id).flatten()
+}
+
+fn bit_for_peri(peri_id: usize) -> u32 {
+    1u32 << peri_id.min(31)
+}
+
+fn mark_uncommitted_peer_candidate(peri_id: usize) {
+    let bit = bit_for_peri(peri_id);
+    UNCOMMITTED_PEER_CANDIDATES.lock(|cell| cell.set(cell.get() | bit));
+}
+
+fn take_uncommitted_peer_candidate(peri_id: usize) -> bool {
+    let bit = bit_for_peri(peri_id);
+    UNCOMMITTED_PEER_CANDIDATES.lock(|cell| {
+        let current = cell.get();
+        cell.set(current & !bit);
+        current & bit != 0
+    })
+}
+
+async fn forget_failed_peer(peri_id: usize, addrs: &RefCell<VecView<Option<[u8; 6]>>>) {
+    take_uncommitted_peer_candidate(peri_id);
+    if let Some(addr) = addrs.borrow_mut().get_mut(peri_id) {
+        *addr = None;
+    }
+
+    // A stored address can belong to an older Qube/half pairing. Keeping it
+    // after an initiating failure prevents the central from ever scanning for
+    // the currently powered peripheral. Invalidate only after the connection
+    // attempt itself fails; normal disconnects retain the proven address.
+    #[cfg(feature = "storage")]
+    FLASH_CHANNEL
+        .send(FlashOperationMessage::PeerAddress(PeerAddress::new(
+            peri_id as u8,
+            false,
+            [0; 6],
+        )))
+        .await;
+}
+
+async fn commit_peer_candidate(peri_id: usize, peer_address: [u8; 6]) {
+    if !take_uncommitted_peer_candidate(peri_id) {
+        return;
+    }
+
+    #[cfg(feature = "storage")]
+    FLASH_CHANNEL
+        .send(FlashOperationMessage::PeerAddress(PeerAddress::new(
+            peri_id as u8,
+            true,
+            peer_address,
+        )))
+        .await;
 }
 
 pub(crate) async fn run_ble_peripheral_manager<
@@ -196,15 +451,16 @@ pub(crate) async fn run_ble_peripheral_manager<
             connect_params: defaul_central_conn_param(),
             scan_config: ScanConfig {
                 filter_accept_list: &[address],
+                // Match the effective 62.5 ms initiating scan used by the
+                // last working bt-hci 0.6 firmware.
+                interval: Duration::from_micros(62_500),
+                window: Duration::from_micros(62_500),
                 ..Default::default()
             },
         };
         wait_for_stack_started().await;
 
-        publish_event(PeripheralConnectedEvent {
-            id: peri_id,
-            connected: false,
-        });
+        publish_peripheral_connection(peri_id, false);
 
         // Connect to peripheral
         match with_timeout(Duration::from_secs(5), async {
@@ -224,31 +480,39 @@ pub(crate) async fn run_ble_peripheral_manager<
         {
             Ok(Ok(conn)) => {
                 info!("Connected to peripheral {}", peri_id);
+                let peer_validated = Cell::new(false);
 
-                publish_event(PeripheralConnectedEvent {
-                    id: peri_id,
-                    connected: true,
-                });
-
-                if let Err(e) =
-                    run_central_manager_task::<_, _, ROW, COL, ROW_OFFSET, COL_OFFSET>(peri_id, stack, &conn).await
+                if let Err(e) = run_central_manager_task::<_, _, ROW, COL, ROW_OFFSET, COL_OFFSET>(
+                    peri_id,
+                    address.addr.into_inner(),
+                    stack,
+                    &conn,
+                    &peer_validated,
+                )
+                .await
                 {
                     #[cfg(feature = "defmt")]
                     let e = defmt::Debug2Format(&e);
                     error!("BLE central error: {:?}", e);
+                }
+                if !peer_validated.get() {
+                    warn!("Split peripheral {} disconnected before validation", peri_id);
+                    // A successful HCI connection can still fail during GATT
+                    // discovery or product validation. Treat that exactly like
+                    // an initiating failure so a stale saved address cannot
+                    // trap Qube in an endless reconnect loop.
+                    forget_failed_peer(peri_id, addrs).await;
                 }
             }
             Ok(Err(e)) => {
                 #[cfg(feature = "defmt")]
                 let e = defmt::Debug2Format(&e);
                 error!("Connect to peripheral {} error: {:?}", peri_id, e);
+                forget_failed_peer(peri_id, addrs).await;
             }
             Err(_) => {
-                // Connect to peripheral timeout
-                warn!("Connect to peripheral {} timeout, clearing", peri_id);
-                if let Some(addr) = addrs.borrow_mut().get_mut(peri_id) {
-                    *addr = None
-                };
+                warn!("Connect to peripheral {} timeout", peri_id);
+                forget_failed_peer(peri_id, addrs).await;
             }
         }
         // Reconnect after 500ms
@@ -258,13 +522,69 @@ pub(crate) async fn run_ble_peripheral_manager<
 
 fn defaul_central_conn_param() -> RequestedConnParams {
     RequestedConnParams {
-        min_connection_interval: Duration::from_micros(7500),
-        max_connection_interval: Duration::from_micros(7500),
+        min_connection_interval: Duration::from_millis(15),
+        max_connection_interval: Duration::from_millis(15),
         // Keep active split links awake every interval so central-to-peripheral
         // layer/state updates reach LEDs without slave-latency delay.
         max_latency: 0,
         supervision_timeout: Duration::from_secs(5),
         ..Default::default()
+    }
+}
+
+fn idle_central_conn_param() -> RequestedConnParams {
+    RequestedConnParams {
+        min_connection_interval: Duration::from_millis(30),
+        max_connection_interval: Duration::from_millis(30),
+        max_latency: 0,
+        supervision_timeout: Duration::from_secs(5),
+        ..Default::default()
+    }
+}
+
+fn sleeping_central_conn_param() -> RequestedConnParams {
+    RequestedConnParams {
+        min_connection_interval: Duration::from_millis(200),
+        max_connection_interval: Duration::from_millis(200),
+        max_latency: 25, // 5s
+        supervision_timeout: Duration::from_secs(11),
+        ..Default::default()
+    }
+}
+
+async fn validate_split_product<T: SplitReader + SplitWriter>(driver: &mut T) -> bool {
+    if let Err(e) = driver.write(&SplitMessage::ProductId(crate::SPLIT_PRODUCT_ID)).await {
+        warn!("Split product check write failed: {:?}", e);
+        return false;
+    }
+
+    match with_timeout(Duration::from_millis(1500), async {
+        loop {
+            match driver.read().await {
+                Ok(SplitMessage::ProductId(product_id)) if product_id == crate::SPLIT_PRODUCT_ID => return true,
+                Ok(SplitMessage::ProductId(product_id)) => {
+                    warn!(
+                        "Split product id mismatch: got {}, expected {}",
+                        product_id,
+                        crate::SPLIT_PRODUCT_ID
+                    );
+                    return false;
+                }
+                Ok(message) => debug!("Ignoring pre-handshake split message: {:?}", message),
+                Err(e) => {
+                    warn!("Split product check read failed: {:?}", e);
+                    return false;
+                }
+            }
+        }
+    })
+    .await
+    {
+        Ok(valid) => valid,
+        Err(_) => {
+            warn!("Split product check timeout");
+            false
+        }
     }
 }
 
@@ -279,8 +599,10 @@ async fn run_central_manager_task<
     const COL_OFFSET: usize,
 >(
     id: usize,
+    peer_address: [u8; 6],
     stack: &'b Stack<'s, C, P>,
     conn: &Connection<'b, P>,
+    peer_validated: &Cell<bool>,
 ) -> Result<(), BleHostError<C::Error>> {
     let client = GattClient::<C, P, 10>::new(stack, conn).await?;
 
@@ -290,9 +612,9 @@ async fn run_central_manager_task<
     info!("Updating connection parameters for peripheral");
     update_conn_params(stack, conn, &defaul_central_conn_param()).await;
 
-    match select3(
+    let result = match select3(
         ble_central_task(&client, conn),
-        run_peripheral_manager::<_, _, ROW, COL, ROW_OFFSET, COL_OFFSET>(id, &client),
+        run_peripheral_manager::<_, _, ROW, COL, ROW_OFFSET, COL_OFFSET>(id, peer_address, &client, peer_validated),
         sleep_manager_task(stack, conn),
     )
     .await
@@ -300,7 +622,9 @@ async fn run_central_manager_task<
         Either3::First(e) => e,
         Either3::Second(e) => e,
         Either3::Third(e) => e,
-    }
+    };
+
+    result
 }
 
 async fn ble_central_task<'a, C: Controller + ControllerCmdAsync<LeSetPhy>, P: PacketPool>(
@@ -333,13 +657,11 @@ async fn run_peripheral_manager<
     const COL_OFFSET: usize,
 >(
     id: usize,
+    peer_address: [u8; 6],
     client: &GattClient<'a, C, P, 10>,
+    peer_validated: &Cell<bool>,
 ) -> Result<(), BleHostError<C::Error>> {
-    let services = client
-        .services_by_uuid(&Uuid::new_long([
-            70u8, 153u8, 101u8, 152u8, 54u8, 53u8, 10u8, 191u8, 7u8, 75u8, 229u8, 24u8, 170u8, 251u8, 213u8, 77u8,
-        ]))
-        .await?;
+    let services = client.services_by_uuid(&Uuid::new_long(SPLIT_SERVICE_UUID)).await?;
     info!("Services found");
     if let Some(service) = services.first() {
         let message_to_central = client
@@ -365,7 +687,15 @@ async fn run_peripheral_manager<
             .await?;
         info!("Subscribing notifications");
         let listener = client.subscribe(&message_to_central, false).await?;
-        let split_ble_driver = BleSplitCentralDriver::new(listener, message_to_peripheral, client);
+        let mut split_ble_driver = BleSplitCentralDriver::new(listener, message_to_peripheral, client);
+        if !validate_split_product(&mut split_ble_driver).await {
+            warn!("Rejecting split peripheral {} after product validation", id);
+            return Ok(());
+        }
+        peer_validated.set(true);
+        commit_peer_candidate(id, peer_address).await;
+        publish_peripheral_connection(id, true);
+
         let peripheral_manager = PeripheralManager::<ROW, COL, ROW_OFFSET, COL_OFFSET, _>::new(split_ble_driver, id);
         peripheral_manager.run().await;
         info!("Peripheral manager stopped");
@@ -461,8 +791,73 @@ pub(crate) async fn wait_for_stack_started() {
     }
 }
 
-/// Sleep manager task for connection between split central and peripheral
-/// Handles sleep timeout and connection parameter adjustments using event-driven approach
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SplitPowerMode {
+    Active,
+    Idle,
+    Sleeping,
+}
+
+fn desired_split_power_mode(now_ms: u32, last_activity_ms: u32, sleep_requested: bool) -> SplitPowerMode {
+    let inactive_ms = now_ms.wrapping_sub(last_activity_ms);
+    if sleep_requested
+        || (SPLIT_CENTRAL_SLEEP_TIMEOUT_SECONDS != 0
+            && inactive_ms >= u32::from(SPLIT_CENTRAL_SLEEP_TIMEOUT_SECONDS).saturating_mul(1_000))
+    {
+        SplitPowerMode::Sleeping
+    } else if inactive_ms >= SPLIT_ACTIVE_WINDOW_MS {
+        SplitPowerMode::Idle
+    } else {
+        SplitPowerMode::Active
+    }
+}
+
+/// Own the split central's global sleep state.
+///
+/// This task is independent of individual peripheral connections so the
+/// configured inactivity timeout still publishes `SleepStateEvent` when a
+/// link is missing, reconnecting, or changing its connection parameters.
+pub async fn run_split_power_state_manager() -> ! {
+    let now_ms = Instant::now().as_millis() as u32;
+    if LAST_ACTIVITY_MS
+        .compare_exchange(0, now_ms, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        SPLIT_SLEEP_REQUESTED.store(false, Ordering::Release);
+    }
+
+    let mut sleeping = desired_split_power_mode(
+        now_ms,
+        LAST_ACTIVITY_MS.load(Ordering::Acquire),
+        SPLIT_SLEEP_REQUESTED.load(Ordering::Acquire),
+    ) == SplitPowerMode::Sleeping;
+
+    if sleeping && !SLEEPING_STATE.swap(true, Ordering::AcqRel) {
+        publish_event(SleepStateEvent::new(true));
+    }
+
+    loop {
+        Timer::after_millis(SPLIT_POWER_POLL_MS).await;
+        let next_sleeping = desired_split_power_mode(
+            Instant::now().as_millis() as u32,
+            LAST_ACTIVITY_MS.load(Ordering::Acquire),
+            SPLIT_SLEEP_REQUESTED.load(Ordering::Acquire),
+        ) == SplitPowerMode::Sleeping;
+        if next_sleeping == sleeping {
+            continue;
+        }
+
+        sleeping = next_sleeping;
+        if SLEEPING_STATE.swap(sleeping, Ordering::AcqRel) != sleeping {
+            publish_event(SleepStateEvent::new(sleeping));
+        }
+    }
+}
+
+/// Adapt split-link connection parameters to recent keyboard activity.
+///
+/// State is shared through atomics instead of a single-consumer signal so a
+/// Qube can manage both peripheral links independently.
 async fn sleep_manager_task<
     'b,
     's: 'b,
@@ -472,78 +867,128 @@ async fn sleep_manager_task<
     stack: &'b Stack<'s, C, P>,
     conn: &Connection<'b, P>,
 ) -> Result<(), BleHostError<C::Error>> {
-    // Skip sleep management if timeout is 0 (disabled)
-    if SPLIT_CENTRAL_SLEEP_TIMEOUT_SECONDS == 0 {
-        info!("Sleep management disabled (timeout = 0)");
-        core::future::pending::<()>().await;
-        return Ok(());
-    }
-
     info!(
-        "Sleep manager started with {}s timeout",
+        "Adaptive split power manager started with {}s sleep timeout",
         SPLIT_CENTRAL_SLEEP_TIMEOUT_SECONDS
     );
 
+    let mut current_mode = SplitPowerMode::Active;
     loop {
-        if !SLEEPING_STATE.load(Ordering::Acquire) {
-            // Wait for timeout or activity (false signal means activity/wakeup)
-            match select(
-                Timer::after_secs(SPLIT_CENTRAL_SLEEP_TIMEOUT_SECONDS.into()),
-                CENTRAL_SLEEP.wait(),
-            )
-            .await
-            {
-                Either::First(_) => {
-                    // Timeout: enter sleep mode
-                }
-                Either::Second(signal_value) => {
-                    // Received signal - if false, it means activity detected
-                    if !signal_value {
-                        debug!("Activity detected, resetting sleep timeout");
-                        continue;
-                    }
-                    // True, enter sleep mode
-                }
+        Timer::after_millis(SPLIT_POWER_POLL_MS).await;
+        let next_mode = desired_split_power_mode(
+            Instant::now().as_millis() as u32,
+            LAST_ACTIVITY_MS.load(Ordering::Acquire),
+            SPLIT_SLEEP_REQUESTED.load(Ordering::Acquire),
+        );
+        if next_mode == current_mode {
+            continue;
+        }
+
+        let conn_params = match next_mode {
+            SplitPowerMode::Active => {
+                info!("Split link entering active mode");
+                defaul_central_conn_param()
             }
+            SplitPowerMode::Idle => {
+                info!("Split link entering idle mode");
+                idle_central_conn_param()
+            }
+            SplitPowerMode::Sleeping => {
+                info!("Split link entering sleep mode");
+                sleeping_central_conn_param()
+            }
+        };
+        update_conn_params(stack, conn, &conn_params).await;
 
-            // Timeout or received true from CENTRAL_SLEEP signal, enter sleep mode
-            info!("Entering sleep mode");
-
-            // `conn` is the split central -> peripheral BLE link. While the
-            // central is sleeping, use a longer interval to reduce central-side
-            // radio wakeups; normal params are restored on activity.
-            let conn_params = RequestedConnParams {
-                min_connection_interval: Duration::from_millis(200),
-                max_connection_interval: Duration::from_millis(200),
-                max_latency: 25, // 5s
-                supervision_timeout: Duration::from_secs(11),
-                ..Default::default()
-            };
-
-            // Update connection parameters
-            update_conn_params(stack, conn, &conn_params).await;
-            SLEEPING_STATE.store(true, Ordering::Release);
-
-            publish_event(SleepStateEvent::new(true));
-        } else {
-            // Wait for activity to wake up (false signal means activity/wakeup)
-            let signal_value = CENTRAL_SLEEP.wait().await;
-            if !signal_value {
-                info!("Waking up from sleep mode due to activity");
-                SLEEPING_STATE.store(false, Ordering::Release);
-
+        // A single split link owns the central sleep state itself. Keeping the
+        // transition here avoids an extra global task on ordinary two-half
+        // keyboards, while multi-peripheral centrals (for example Qube) use
+        // `run_split_power_state_manager` so one link cannot consume another
+        // link's sleep transition.
+        if crate::SPLIT_PERIPHERALS_NUM == 1 {
+            if next_mode == SplitPowerMode::Sleeping {
+                if !SLEEPING_STATE.swap(true, Ordering::AcqRel) {
+                    publish_event(SleepStateEvent::new(true));
+                }
+            } else if current_mode == SplitPowerMode::Sleeping && SLEEPING_STATE.swap(false, Ordering::AcqRel) {
                 publish_event(SleepStateEvent::new(false));
-
-                // Restore normal connection parameters
-                update_conn_params(stack, conn, &defaul_central_conn_param()).await;
             }
         }
+        current_mode = next_mode;
     }
 }
 
 /// Update the activity time to indicate user activity
-/// This function triggers activity wakeup signal for sleep management
 pub(crate) fn update_activity_time() {
-    CENTRAL_SLEEP.signal(false);
-    debug!("Activity detected, signaling wakeup");
+    LAST_ACTIVITY_MS.store(Instant::now().as_millis() as u32, Ordering::Release);
+    SPLIT_SLEEP_REQUESTED.store(false, Ordering::Release);
+    debug!("Activity detected, restoring active split link");
+}
+
+/// Request deep split-link sleep from a host suspend or transport timeout.
+pub(crate) fn request_sleep() {
+    SPLIT_SLEEP_REQUESTED.store(true, Ordering::Release);
+}
+
+#[cfg(test)]
+mod advertisement_tests {
+    use super::*;
+
+    fn current_advertisement(product_id: u16, peripheral_id: u8) -> [u8; 28] {
+        let mut data = [0u8; 28];
+        data[0..3].copy_from_slice(&[2, 0x01, LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED]);
+        data[3] = 17;
+        data[4] = 0x07;
+        data[5..21].copy_from_slice(&SPLIT_SERVICE_UUID);
+        data[21..28].copy_from_slice(&[
+            6,
+            0xff,
+            (SPLIT_COMPANY_ID & 0xff) as u8,
+            (SPLIT_COMPANY_ID >> 8) as u8,
+            (product_id & 0xff) as u8,
+            (product_id >> 8) as u8,
+            peripheral_id,
+        ]);
+        data
+    }
+
+    #[test]
+    fn current_advertisement_requires_matching_product() {
+        let matching = current_advertisement(crate::SPLIT_PRODUCT_ID, 1);
+        assert_eq!(split_peripheral_id_from_advertisement(&matching), Some(1));
+
+        let mismatched = current_advertisement(crate::SPLIT_PRODUCT_ID.wrapping_add(1), 1);
+        assert_eq!(split_peripheral_id_from_advertisement(&mismatched), None);
+    }
+
+    #[test]
+    fn current_advertisement_requires_split_service() {
+        let mut data = current_advertisement(crate::SPLIT_PRODUCT_ID, 0);
+        data[4] = 0x06;
+        assert_eq!(split_peripheral_id_from_advertisement(&data), None);
+    }
+
+    #[test]
+    fn legacy_advertisement_remains_discoverable_during_migration() {
+        let mut data = [0u8; 26];
+        data[0..3].copy_from_slice(&[2, 0x01, LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED]);
+        data[3] = 17;
+        data[4] = 0x07;
+        data[5..21].copy_from_slice(&SPLIT_SERVICE_UUID);
+        data[21..26].copy_from_slice(&[4, 0xff, 0x18, 0xe1, 1]);
+
+        assert_eq!(legacy_split_peripheral_id_from_advertisement(&data), Some(1));
+    }
+
+    #[test]
+    fn split_power_mode_tracks_activity_and_sleep_timeout() {
+        assert_eq!(desired_split_power_mode(1_999, 0, false), SplitPowerMode::Active);
+        assert_eq!(desired_split_power_mode(2_000, 0, false), SplitPowerMode::Idle);
+
+        if SPLIT_CENTRAL_SLEEP_TIMEOUT_SECONDS != 0 {
+            let timeout_ms = u32::from(SPLIT_CENTRAL_SLEEP_TIMEOUT_SECONDS) * 1_000;
+            assert_eq!(desired_split_power_mode(timeout_ms, 0, false), SplitPowerMode::Sleeping);
+        }
+        assert_eq!(desired_split_power_mode(1, 0, true), SplitPowerMode::Sleeping);
+    }
 }

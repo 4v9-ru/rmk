@@ -14,7 +14,6 @@ use crate::NUM_BLE_PROFILE;
 use crate::ble::profile::BleProfileAction;
 use crate::channel::BLE_PROFILE_CHANNEL;
 use crate::event::{ActionEvent, KeyboardEvent};
-
 #[cfg(feature = "split")]
 use crate::event::{ClearPeerEvent, PeripheralBatteryRefreshEvent, publish_event};
 
@@ -47,6 +46,12 @@ pub struct ErgohavenUserKeys {
     clear_peer_key: Option<KeyboardEvent>,
 }
 
+impl Default for ErgohavenUserKeys {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ErgohavenUserKeys {
     pub const fn new() -> Self {
         Self {
@@ -60,7 +65,7 @@ impl ErgohavenUserKeys {
             return;
         };
 
-        let ble_id = legacy_k04_ble_id(id).unwrap_or(id);
+        let ble_id = k04_common_ble_id(id).unwrap_or(id);
         if event.keyboard_event.pressed {
             if ble_id == USER_BT_CLEAR_PEER {
                 self.arm_clear_peer(event.keyboard_event);
@@ -146,7 +151,7 @@ impl ErgohavenUserKeys {
     }
 }
 
-fn legacy_k04_ble_id(id: u8) -> Option<u8> {
+fn k04_common_ble_id(id: u8) -> Option<u8> {
     match id {
         K04_USER_BT_PROFILE0 => Some(0),
         K04_USER_BT_PROFILE1 => Some(1),

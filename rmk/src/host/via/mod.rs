@@ -1,5 +1,6 @@
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use embassy_time::Instant;
+use rmk_types::battery::BatteryStatus;
 use rmk_types::protocol::vial::{VIA_FIRMWARE_VERSION, VIA_PROTOCOL_VERSION, ViaCommand, ViaKeyboardInfo};
 use vial::process_vial;
 
@@ -59,10 +60,21 @@ fn host_data_text(data: &[u8; 32]) -> &str {
 
 fn battery_level_byte(status: rmk_types::battery::BatteryStatus) -> Option<u8> {
     match status {
-        rmk_types::battery::BatteryStatus::Available {
-            level: Some(level), ..
-        } if level <= 100 => Some(level),
+        rmk_types::battery::BatteryStatus::Available { level: Some(level), .. } if level <= 100 => Some(level),
         _ => None,
+    }
+}
+
+fn battery_halves_for_split(
+    central: BatteryStatus,
+    peripheral_0: BatteryStatus,
+    peripheral_1: BatteryStatus,
+    peripheral_count: usize,
+) -> (BatteryStatus, BatteryStatus) {
+    if peripheral_count == 1 {
+        (central, peripheral_0)
+    } else {
+        (peripheral_0, peripheral_1)
     }
 }
 
@@ -105,8 +117,7 @@ impl<'a> VialService<'a> {
                             BigEndian::write_u32(&mut report.input_data[2..6], value);
                         }
                         ViaKeyboardInfo::LayoutOptions => {
-                            // TODO: retrieve layout option from storage
-                            let layout_option: u32 = 0;
+                            let layout_option = self.ctx.layout_options().await;
                             BigEndian::write_u32(&mut report.input_data[2..6], layout_option);
                         }
                         #[cfg(not(feature = "vial_lock"))]
@@ -184,15 +195,17 @@ impl<'a> VialService<'a> {
 
                     #[cfg(all(feature = "split", feature = "_ble"))]
                     {
-                        if let Some(level) =
-                            battery_level_byte(self.ctx.peripheral_battery_status(0))
-                        {
+                        let (left, right) = battery_halves_for_split(
+                            self.ctx.battery_status(),
+                            self.ctx.peripheral_battery_status(0),
+                            self.ctx.peripheral_battery_status(1),
+                            crate::SPLIT_PERIPHERALS_NUM,
+                        );
+                        if let Some(level) = battery_level_byte(left) {
                             report.input_data[4] |= 0x01;
                             report.input_data[5] = level;
                         }
-                        if let Some(level) =
-                            battery_level_byte(self.ctx.peripheral_battery_status(1))
-                        {
+                        if let Some(level) = battery_level_byte(right) {
                             report.input_data[4] |= 0x02;
                             report.input_data[6] = level;
                         }
@@ -238,17 +251,24 @@ impl<'a> VialService<'a> {
                 let offset = BigEndian::read_u16(&report.output_data[1..3]);
                 // Current sequence size, <= 28
                 let size = report.output_data[3];
-                // End of current sequence in the macro cache
-                // The first sequence, reset the macro cache
-                if offset == 0 {
-                    self.ctx.reset_macro_buffer();
-                }
+                // `output_data` is 32 bytes, so the payload slice output_data[4..4 + size]
+                // is only valid for size <= 28. Reject oversized writes instead of
+                // panicking, mirroring the DynamicKeymapMacroGetBuffer handler above.
+                if size <= 28 {
+                    // End of current sequence in the macro cache
+                    // The first sequence, reset the macro cache
+                    if offset == 0 {
+                        self.ctx.reset_macro_buffer();
+                    }
 
-                // Update macro cache + flush full buffer to storage
-                info!("Setting macro buffer, offset: {}, size: {}", offset, size);
-                self.ctx
-                    .write_macro_buffer(offset as usize, &report.output_data[4..4 + size as usize])
-                    .await;
+                    // Update macro cache + flush full buffer to storage
+                    info!("Setting macro buffer, offset: {}, size: {}", offset, size);
+                    self.ctx
+                        .write_macro_buffer(offset as usize, &report.output_data[4..4 + size as usize])
+                        .await;
+                } else {
+                    report.input_data[0] = 0xFF;
+                }
             }
             ViaCommand::DynamicKeymapMacroReset => {
                 warn!("Macro reset -- to be implemented")
@@ -324,5 +344,86 @@ impl Runnable for VialService<'_> {
             self.process_via_packet(&mut report).await;
             try_send_host_reply(transport, report.input_data);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use embassy_futures::block_on;
+    use rmk_types::action::KeyAction;
+    use rmk_types::battery::ChargeState;
+
+    use super::*;
+    use crate::config::{BehaviorConfig, PositionalConfig};
+    use crate::keymap::{KeyMap, KeymapData};
+
+    /// Build a minimal 1x1x1 keymap + `VialService` and run `f` against it.
+    fn with_service<R>(f: impl FnOnce(&mut VialService) -> R) -> R {
+        let mut data = KeymapData::new([[[KeyAction::No]]]);
+        let mut behavior = BehaviorConfig::default();
+        let positional = PositionalConfig::<1, 1>::default();
+        let keymap = block_on(KeyMap::new(&mut data, &mut behavior, &positional));
+        let ctx = KeyboardContext::new(&keymap);
+        let config = RmkConfig::default();
+        let mut service = VialService::new(&ctx, &config);
+        f(&mut service)
+    }
+
+    /// A `DynamicKeymapMacroSetBuffer` (0x0F) report with `offset = 0` and the
+    /// given payload `size` byte. The caller mirrors `Runnable::run` by seeding
+    /// `input_data` with a copy of `output_data`.
+    fn macro_set_buffer_report(size: u8) -> ViaReport {
+        let mut output_data = [0u8; 32];
+        output_data[0] = 0x0F; // DynamicKeymapMacroSetBuffer
+        output_data[3] = size;
+        ViaReport {
+            input_data: output_data,
+            output_data,
+        }
+    }
+
+    // `output_data` is [u8; 32], so the handler slices `output_data[4..4 + size]`.
+    // size == 28 is the largest payload that fits (writes output_data[4..32]).
+    #[test]
+    fn macro_set_buffer_max_size_ok() {
+        with_service(|service| {
+            let mut report = macro_set_buffer_report(28);
+            block_on(service.process_via_packet(&mut report));
+        });
+    }
+
+    // size == 29 slices output_data[4..33], which is out of bounds. The sibling
+    // DynamicKeymapMacroGetBuffer handler already rejects size > 28 with 0xFF;
+    // SetBuffer must do the same instead of panicking.
+    #[test]
+    fn macro_set_buffer_oversize_rejected() {
+        with_service(|service| {
+            let mut report = macro_set_buffer_report(29);
+            block_on(service.process_via_packet(&mut report));
+            assert_eq!(report.input_data[0], 0xFF);
+        });
+    }
+
+    fn battery(level: u8) -> BatteryStatus {
+        BatteryStatus::Available {
+            charge_state: ChargeState::Unknown,
+            level: Some(level),
+        }
+    }
+
+    #[test]
+    fn no_qube_split_uses_central_and_first_peripheral_batteries() {
+        assert_eq!(
+            battery_halves_for_split(battery(80), battery(55), BatteryStatus::Unavailable, 1),
+            (battery(80), battery(55))
+        );
+    }
+
+    #[test]
+    fn qube_split_uses_both_peripheral_batteries() {
+        assert_eq!(
+            battery_halves_for_split(battery(100), battery(80), battery(55), 2),
+            (battery(80), battery(55))
+        );
     }
 }

@@ -58,18 +58,46 @@ pub struct ViaReport {
     pub(crate) output_data: [u8; 32],
 }
 
+/// BLE-only Vial report descriptor.
+///
+/// USB keeps the standard unnumbered Vial interface above. The composite BLE
+/// HID service must number every report, otherwise Linux interprets the first
+/// Vial payload byte as another report's id.
+#[cfg(all(feature = "_ble", feature = "host"))]
+#[gen_hid_descriptor(
+    (collection = APPLICATION, usage_page = 0xFF60, usage = 0x61) = {
+        (report_id = 0x05,) = {
+            (usage = 0x62, logical_min = 0x0) = {
+                #[item_settings(data,variable,absolute)] input_data=input;
+            };
+            (usage = 0x63, logical_min = 0x0) = {
+                #[item_settings(data,variable,absolute)] output_data=output;
+            };
+        };
+    }
+)]
+#[derive(Default)]
+pub struct BleViaReport {
+    pub(crate) input_data: [u8; 32],
+    pub(crate) output_data: [u8; 32],
+}
+
 /// Predefined report ids for composite hid report.
-/// Should be same with `#[gen_hid_descriptor]`
-/// DO NOT EDIT
+/// Should be same with `#[gen_hid_descriptor]` of `CompositeReport` and `BleCompositeReport`
+/// and the Report Reference descriptors in `ble::ble_server::HidService`.
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 
 pub enum CompositeReportType {
     #[default]
     None = 0x00,
-    Mouse = 0x01,
-    Media = 0x02,
-    System = 0x03,
+    /// Used only in the BLE report map; the USB keyboard interface stays a
+    /// report-ID-less boot keyboard.
+    Keyboard = 0x01,
+    Mouse = 0x02,
+    Media = 0x03,
+    System = 0x04,
+    Vial = 0x05,
 }
 
 /// Plover HID stenography report.
@@ -146,7 +174,7 @@ mod steno_tests {
 #[gen_hid_descriptor(
     (collection = APPLICATION, usage_page = GENERIC_DESKTOP, usage = MOUSE) = {
         (collection = PHYSICAL, usage = POINTER) = {
-            (report_id = 0x01,) = {
+            (report_id = 0x02,) = {
                 (usage_page = BUTTON, usage_min = BUTTON_1, usage_max = BUTTON_8) = {
                     #[packed_bits = 8] #[item_settings(data,variable,absolute)] buttons=input;
                 };
@@ -170,14 +198,14 @@ mod steno_tests {
         };
     },
     (collection = APPLICATION, usage_page = CONSUMER, usage = CONSUMER_CONTROL) = {
-        (report_id = 0x02,) = {
+        (report_id = 0x03,) = {
             (usage_page = CONSUMER, usage_min = 0x00, usage_max = 0x514) = {
             #[item_settings(data,array,absolute,not_null)] media_usage_id=input;
             }
         };
     },
     (collection = APPLICATION, usage_page = GENERIC_DESKTOP, usage = SYSTEM_CONTROL) = {
-        (report_id = 0x03,) = {
+        (report_id = 0x04,) = {
             (usage_min = 0x01, usage_max = 0xB7, logical_min = 1) = {
                 #[item_settings(data,array,absolute,not_null)] system_usage_id=input;
             };
@@ -193,6 +221,159 @@ pub struct CompositeReport {
     pub(crate) pan: i8,   // Scroll left (negative) or right (positive) this many units
     pub(crate) media_usage_id: u16,
     pub(crate) system_usage_id: u8,
+}
+
+/// The BLE report map: everything in one HID service, distinguished by report id.
+///
+/// Android's HID host only attaches to the first HID service instance (AOSP
+/// `bta_hh_le.cc`, b/286413526), so unlike USB the keyboard/mouse/media/system
+/// reports must share a single service. Only `desc()` is used; the actual
+/// payloads are still serialized from `KeyboardReport`, `MouseReport`, etc.,
+/// as HID-over-GATT carries the report id in the Report Reference descriptor
+/// instead of the payload.
+#[cfg(feature = "_ble")]
+#[gen_hid_descriptor(
+    (collection = APPLICATION, usage_page = GENERIC_DESKTOP, usage = KEYBOARD) = {
+        (report_id = 0x01,) = {
+            (usage_page = KEYBOARD, usage_min = 0xE0, usage_max = 0xE7) = {
+                #[packed_bits = 8] #[item_settings(data,variable,absolute)] modifier=input;
+            };
+            (logical_min = 0,) = {
+                #[item_settings(constant,variable,absolute)] reserved=input;
+            };
+            (usage_page = LEDS, usage_min = 0x01, usage_max = 0x05) = {
+                #[packed_bits = 5] #[item_settings(data,variable,absolute)] leds=output;
+            };
+            (usage_page = KEYBOARD, usage_min = 0x00, usage_max = 0xDD) = {
+                #[item_settings(data,array,absolute)] keycodes=input;
+            };
+        };
+    },
+    (collection = APPLICATION, usage_page = GENERIC_DESKTOP, usage = MOUSE) = {
+        (collection = PHYSICAL, usage = POINTER) = {
+            (report_id = 0x02,) = {
+                (usage_page = BUTTON, usage_min = BUTTON_1, usage_max = BUTTON_8) = {
+                    #[packed_bits = 8] #[item_settings(data,variable,absolute)] buttons=input;
+                };
+                (usage_page = GENERIC_DESKTOP,) = {
+                    (usage = X,) = {
+                        #[item_settings(data,variable,relative)] x=input;
+                    };
+                    (usage = Y,) = {
+                        #[item_settings(data,variable,relative)] y=input;
+                    };
+                    (usage = WHEEL,) = {
+                        #[item_settings(data,variable,relative)] wheel=input;
+                    };
+                };
+                (usage_page = CONSUMER,) = {
+                    (usage = AC_PAN,) = {
+                        #[item_settings(data,variable,relative)] pan=input;
+                    };
+                };
+            };
+        };
+    },
+    (collection = APPLICATION, usage_page = CONSUMER, usage = CONSUMER_CONTROL) = {
+        (report_id = 0x03,) = {
+            (usage_page = CONSUMER, usage_min = 0x00, usage_max = 0x514) = {
+            #[item_settings(data,array,absolute,not_null)] media_usage_id=input;
+            }
+        };
+    },
+    (collection = APPLICATION, usage_page = GENERIC_DESKTOP, usage = SYSTEM_CONTROL) = {
+        (report_id = 0x04,) = {
+            (usage_min = 0x01, usage_max = 0xB7, logical_min = 1) = {
+                #[item_settings(data,array,absolute,not_null)] system_usage_id=input;
+            };
+        };
+    }
+)]
+#[allow(dead_code)]
+#[derive(Default)]
+pub struct BleCompositeReport {
+    pub(crate) modifier: u8,
+    pub(crate) reserved: u8,
+    pub(crate) leds: u8,
+    pub(crate) keycodes: [u8; 6],
+    pub(crate) buttons: u8,
+    pub(crate) x: i8,
+    pub(crate) y: i8,
+    pub(crate) wheel: i8,
+    pub(crate) pan: i8,
+    pub(crate) media_usage_id: u16,
+    pub(crate) system_usage_id: u8,
+}
+
+#[cfg(all(feature = "_ble", feature = "host"))]
+pub(crate) const BLE_REPORT_MAP_LEN: usize = 207;
+
+/// Compose the one HID-over-GATT report map used by BLE hosts.
+///
+/// Keeping Vial in this same service avoids the platform-dependent behavior of
+/// multiple HOGP service instances. USB keeps its existing dedicated,
+/// unnumbered Vial interface. BLE assigns Vial report id 5 so the entire
+/// composite report map follows the HID requirement that report id 0 cannot be
+/// mixed with numbered reports.
+#[cfg(all(feature = "_ble", feature = "host"))]
+pub(crate) fn ble_report_map() -> [u8; BLE_REPORT_MAP_LEN] {
+    let composite = BleCompositeReport::desc();
+    let vial = BleViaReport::desc();
+    assert_eq!(composite.len() + vial.len(), BLE_REPORT_MAP_LEN);
+
+    let mut report_map = [0u8; BLE_REPORT_MAP_LEN];
+    report_map[..vial.len()].copy_from_slice(vial);
+    report_map[vial.len()..].copy_from_slice(composite);
+    report_map
+}
+
+#[cfg(all(test, feature = "_ble"))]
+mod ble_report_map_tests {
+    use usbd_hid::descriptor::SerializedDescriptor;
+
+    use super::BleCompositeReport;
+    #[cfg(feature = "host")]
+    use super::{BLE_REPORT_MAP_LEN, BleViaReport, CompositeReportType, ble_report_map};
+
+    /// Pins the report map: `ble_server::HidService` hardcodes its length, and
+    /// the report ids must match `CompositeReportType`.
+    #[test]
+    fn ble_report_map_matches_service_definition() {
+        let desc = BleCompositeReport::desc();
+        fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+            haystack.windows(needle.len()).position(|w| w == needle)
+        }
+        assert_eq!(desc.len(), 178, "update HidService's report_map size on change");
+        let keyboard = find(desc, &[0x09, 0x06]).expect("missing Usage Keyboard");
+        for report_id in 1u8..=4 {
+            let id = find(desc, &[0x85, report_id]).unwrap_or_else(|| panic!("missing ReportID {report_id}"));
+            if report_id == 0x01 {
+                assert!(keyboard < id, "keyboard collection must own ReportID 1");
+            }
+        }
+    }
+
+    #[cfg(feature = "host")]
+    #[test]
+    fn host_ble_report_map_includes_vial_in_the_composite_service() {
+        let desc = ble_report_map();
+        fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+            haystack.windows(needle.len()).position(|w| w == needle)
+        }
+
+        assert_eq!(desc.len(), BLE_REPORT_MAP_LEN);
+        let vial_usage = find(&desc, &[0x06, 0x60, 0xff, 0x09, 0x61]).expect("missing Vial application usage");
+        let vial_report_id = find(&desc, &[0x85, CompositeReportType::Vial as u8]).expect("missing Vial ReportID");
+        assert!(
+            vial_usage < vial_report_id,
+            "Vial application collection must own ReportID 5"
+        );
+        assert_eq!(BleViaReport::desc().len(), 29);
+        assert!(
+            !desc.windows(2).any(|item| item == [0x85, 0x00]),
+            "ReportID 0 is reserved"
+        );
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -13,9 +13,10 @@ fn main() {
     //
     // Build-time constants only need [rmk] + [event]. Keep event defaults support
     // without requiring [keyboard.board]/[keyboard.chip].
-    let config: KeyboardTomlConfig = if let Ok(toml_path) = std::env::var("KEYBOARD_TOML_PATH") {
+    let toml_path = std::env::var("KEYBOARD_TOML_PATH").ok();
+    let config: KeyboardTomlConfig = if let Some(toml_path) = &toml_path {
         println!("cargo:rerun-if-changed={toml_path}");
-        KeyboardTomlConfig::new_from_toml_path_with_event_defaults(&toml_path)
+        KeyboardTomlConfig::new_from_toml_path_with_event_defaults(toml_path)
     } else {
         toml::from_str("").expect("Failed to parse empty keyboard config\n")
     };
@@ -69,7 +70,20 @@ fn generate_constants(bc: &BuildConstants) -> String {
         "pub const SPLIT_PERIPHERALS_NUM: usize = {};",
         bc.split_peripherals_num
     ));
+    lines.push(format!("pub const SPLIT_PRODUCT_ID: u16 = {};", bc.product_id));
     lines.push(format!("pub const NUM_BLE_PROFILE: usize = {};", bc.ble_profiles_num));
+    lines.push(format!(
+        "pub const SPLIT_PAIRING_TIMEOUT_SECONDS: u32 = {};",
+        bc.split_pairing_timeout_seconds
+    ));
+    lines.push(format!(
+        "pub const BLE_RECONNECT_TIMEOUT_SECONDS: u32 = {};",
+        bc.ble_reconnect_timeout_seconds
+    ));
+    lines.push(format!(
+        "pub const BLE_PAIRING_TIMEOUT_SECONDS: u32 = {};",
+        bc.ble_pairing_timeout_seconds
+    ));
     lines.push(format!(
         "pub const SPLIT_CENTRAL_SLEEP_TIMEOUT_SECONDS: u32 = {};",
         bc.split_central_sleep_timeout_seconds
@@ -77,7 +91,7 @@ fn generate_constants(bc: &BuildConstants) -> String {
     lines.push(format!("pub const MORSE_MAX_NUM: usize = {};", bc.morse_max_num));
     lines.push(format!(
         "pub const AUTO_MOUSE_LAYER_MAX_NUM: usize = {};",
-        rmk_config::resolved::behavior::AUTO_MOUSE_LAYER_MAX_NUM
+        bc.auto_mouse_layer_max_num
     ));
     lines.push(format!(
         "pub const MAX_PATTERNS_PER_KEY: usize = {};",

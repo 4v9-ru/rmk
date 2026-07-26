@@ -9,9 +9,8 @@ RMK BLE split firmware for Ergohaven keyboards and trackballs (nRF52840).
 | Keyboard    | Layout         | Encoders | Trackball |
 |-------------|----------------|----------|-----------|
 | K:03        | 5×6 + 5 thumb  | 3+3      | —         |
-| K:04        | 5×6 + 5 thumb  | 1+1      | —         |
-| K:04 Qube   | 5×6 + 5 thumb  | 1+1      | Qube dongle + ST7789 |
-| K:04 Micro  | 3×5 + 3 thumb  | 1+1      | —         |
+| K:04 Series | K:04 / Mini / Micro | 1+1 | —         |
+| K:04 Series + Qube | K:04 / Mini / Micro | 1+1 | Qube dongle + ST7789 |
 | Imperial44  | 4×6 + 3 thumb  | 1+1      | —         |
 | OP36        | 3×5 + 3 thumb  | —        | —         |
 | OP36 Qube   | 3×5 + 3 thumb  | —        | Qube dongle + ST7789 |
@@ -40,7 +39,7 @@ cargo build --release --bin central
 cargo build --release --bin peripheral
 ```
 
-Current K:04/OP36 root-RMK regression matrix:
+Current K:04/OP36 regression matrix:
 
 ```sh
 ./scripts/build_k04_matrix.sh
@@ -65,4 +64,8 @@ Every push builds all devices in parallel via GitHub Actions. UF2 artifacts avai
 Based on [RMK](https://github.com/HaoboGu/rmk) 0.8.2 with nRF52840 BLE support.
 
 The root `rmk`, `rmk-macro`, `rmk-types`, and `rmk-config` crates are the
-current source of truth for all firmware targets in this repository.
+source of truth for firmware targets in this repository. K:04 without Qube
+and K:04 with Qube each build K:04, Mini, and Micro profiles from one shared
+crate. They use the same BLE split connection engine; only the central topology
+differs: a central with a local matrix and one peripheral, or a matrix-less
+Qube central with two peripheral halves.

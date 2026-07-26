@@ -31,6 +31,7 @@ fn default_sub_count() -> usize {
 
 /// Compile-time constants emitted as `pub const` items by `rmk-types/build.rs`.
 pub struct BuildConstants {
+    pub product_id: u16,
     pub combo_max_num: usize,
     pub combo_max_length: usize,
     pub fork_max_num: usize,
@@ -45,9 +46,13 @@ pub struct BuildConstants {
     pub flash_channel_size: usize,
     pub split_peripherals_num: usize,
     pub ble_profiles_num: usize,
+    pub split_pairing_timeout_seconds: u32,
+    pub ble_reconnect_timeout_seconds: u32,
+    pub ble_pairing_timeout_seconds: u32,
     pub split_central_sleep_timeout_seconds: u32,
     pub protocol_max_bulk_size: usize,
     pub protocol_macro_chunk_size: usize,
+    pub auto_mouse_layer_max_num: usize,
     pub events: Vec<EventChannel>,
     pub passkey: Option<Passkey>,
 }
@@ -96,6 +101,7 @@ impl crate::KeyboardTomlConfig {
 
         let mut events = event_channels!(
             connection_status_change,
+            ble_advertising_mode,
             modifier,
             keyboard,
             layer_change,
@@ -108,6 +114,7 @@ impl crate::KeyboardTomlConfig {
             pointing,
             peripheral_connected,
             central_connected,
+            split_connection_state,
             peripheral_battery,
             peripheral_battery_refresh,
             peripheral_settings,
@@ -158,7 +165,29 @@ impl crate::KeyboardTomlConfig {
             ));
         }
 
+        let auto_mouse_layer_max_num = rmk
+            .auto_mouse_layer_max_num
+            .unwrap_or(crate::resolved::behavior::DEFAULT_AUTO_MOUSE_LAYER_MAX_NUM);
+        if let Some(entries) = self.behavior.as_ref().and_then(|b| b.auto_mouse_layer.as_ref()) {
+            if entries.len() > auto_mouse_layer_max_num {
+                return Err(format!(
+                    "number of [[behavior.auto_mouse_layer]] entries ({}) exceeds auto_mouse_layer_max_num ({})",
+                    entries.len(),
+                    auto_mouse_layer_max_num
+                ));
+            }
+            let uses_action_event = entries
+                .iter()
+                .any(|e| e.deactivate_on_key == Some(true) || e.reset_timeout_on_key == Some(true));
+            if uses_action_event && events.iter().any(|e| e.name == "action" && e.subs == 0) {
+                return Err(
+                    "[[behavior.auto_mouse_layer]].deactivate_on_key / reset_timeout_on_key require [event.action] subs to be at least 1".to_string(),
+                );
+            }
+        }
+
         Ok(BuildConstants {
+            product_id: self.keyboard.clone().unwrap_or_default().product_id,
             combo_max_num: rmk.combo_max_num,
             combo_max_length: rmk.combo_max_length,
             fork_max_num: rmk.fork_max_num,
@@ -173,9 +202,13 @@ impl crate::KeyboardTomlConfig {
             flash_channel_size: rmk.flash_channel_size,
             split_peripherals_num,
             ble_profiles_num: rmk.ble_profiles_num,
+            split_pairing_timeout_seconds: rmk.split_pairing_timeout_seconds,
+            ble_reconnect_timeout_seconds: rmk.ble_reconnect_timeout_seconds,
+            ble_pairing_timeout_seconds: rmk.ble_pairing_timeout_seconds,
             split_central_sleep_timeout_seconds: rmk.split_central_sleep_timeout_seconds,
             protocol_max_bulk_size: rmk.protocol_max_bulk_size,
             protocol_macro_chunk_size: rmk.protocol_macro_chunk_size,
+            auto_mouse_layer_max_num,
             events,
             passkey,
         })
@@ -251,5 +284,81 @@ mod tests {
 
         assert!(!passkey.enabled);
         assert_eq!(passkey.timeout_secs, DEFAULT_PASSKEY_ENTRY_TIMEOUT_SECS);
+    }
+
+    fn parse(toml: &str) -> crate::KeyboardTomlConfig {
+        toml::from_str(toml).expect("Failed to parse keyboard config")
+    }
+
+    #[test]
+    fn auto_mouse_layer_max_num_explicitly_too_small_is_rejected() {
+        let toml = "[rmk]\nauto_mouse_layer_max_num = 0\n\n[[behavior.auto_mouse_layer]]\ntarget_layer = 1\n";
+        let err = match parse(toml).build_constants(&[]) {
+            Ok(_) => panic!("expected auto_mouse_layer_max_num validation failure"),
+            Err(err) => err,
+        };
+        assert!(err.contains("auto_mouse_layer_max_num"));
+    }
+
+    #[test]
+    fn auto_mouse_layer_within_capacity_is_accepted() {
+        let toml = "[rmk]\nauto_mouse_layer_max_num = 1\n\n[[behavior.auto_mouse_layer]]\ntarget_layer = 1\nextra_mouse_keys = [\"LCtrl\"]\n";
+        assert!(parse(toml).build_constants(&[]).is_ok());
+    }
+
+    #[test]
+    fn deactivate_on_key_without_action_subs_is_rejected() {
+        let toml = "[[behavior.auto_mouse_layer]]\ntarget_layer = 1\ndeactivate_on_key = true\n";
+        let err = match parse(toml).build_constants(&[]) {
+            Ok(_) => panic!("expected action subs validation failure"),
+            Err(err) => err,
+        };
+        assert!(err.contains("[event.action]"));
+    }
+
+    #[test]
+    fn deactivate_on_key_with_action_subs_set_is_accepted() {
+        let toml = "[event.action]\nchannel_size = 16\npubs = 1\nsubs = 1\n\n[[behavior.auto_mouse_layer]]\ntarget_layer = 1\ndeactivate_on_key = true\n";
+        assert!(parse(toml).build_constants(&[]).is_ok());
+    }
+
+    #[test]
+    fn split_reserves_peripheral_manager_settings_subscribers() {
+        let base = parse("").build_constants(&[]).unwrap();
+        let split = parse("").build_constants(&["split"]).unwrap();
+        let base_subs = base
+            .events
+            .iter()
+            .find(|event| event.name == "peripheral_settings")
+            .unwrap()
+            .subs;
+        let split_subs = split
+            .events
+            .iter()
+            .find(|event| event.name == "peripheral_settings")
+            .unwrap()
+            .subs;
+
+        assert_eq!(split_subs, base_subs + 2);
+    }
+
+    #[test]
+    fn split_ble_reserves_advertising_mode_sync_subscribers() {
+        let base = parse("").build_constants(&[]).unwrap();
+        let split_ble = parse("").build_constants(&["split", "_ble"]).unwrap();
+        let base_subs = base
+            .events
+            .iter()
+            .find(|event| event.name == "ble_advertising_mode")
+            .unwrap()
+            .subs;
+        let split_ble_subs = split_ble
+            .events
+            .iter()
+            .find(|event| event.name == "ble_advertising_mode")
+            .unwrap()
+            .subs;
+
+        assert_eq!(split_ble_subs, base_subs + 2);
     }
 }

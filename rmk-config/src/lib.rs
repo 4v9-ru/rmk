@@ -197,6 +197,11 @@ impl KeyboardTomlConfig {
                 // Update the morse_max_num
                 self.rmk.morse_max_num = self.rmk.morse_max_num.max(morses.len());
             }
+
+            let auto_mouse_layers = behavior.auto_mouse_layer.as_deref().unwrap_or_default();
+            self.rmk.auto_mouse_layer_max_num.get_or_insert(auto_mouse_layers.len());
+        } else {
+            self.rmk.auto_mouse_layer_max_num.get_or_insert(0);
         }
     }
 }
@@ -252,7 +257,16 @@ pub(crate) struct RmkConstantsConfig {
     /// The number of available BLE profiles
     #[serde_inline_default(3)]
     pub ble_profiles_num: usize,
-    /// BLE Split Central sleep timeout in minutes (0 = disabled)
+    /// BLE split pairing/reconnect window in seconds (0 = legacy/unbounded)
+    #[serde_inline_default(0)]
+    pub split_pairing_timeout_seconds: u32,
+    /// BLE reconnect window for the active bonded host in seconds
+    #[serde_inline_default(300)]
+    pub ble_reconnect_timeout_seconds: u32,
+    /// BLE pairing window for a new host in seconds (0 = legacy behavior)
+    #[serde_inline_default(0)]
+    pub ble_pairing_timeout_seconds: u32,
+    /// BLE Split Central sleep timeout in seconds (0 = disabled)
     #[serde_inline_default(0)]
     pub split_central_sleep_timeout_seconds: u32,
     /// Maximum number of key actions in a bulk keymap transfer (protocol).
@@ -263,6 +277,9 @@ pub(crate) struct RmkConstantsConfig {
     /// Smaller values reduce firmware RAM usage but require more round-trips.
     #[serde_inline_default(64)]
     pub protocol_macro_chunk_size: usize,
+    /// Maximum number of auto mouse layer entries; auto-derived from `[[behavior.auto_mouse_layer]]` if unset.
+    #[serde(default)]
+    pub auto_mouse_layer_max_num: Option<usize>,
 }
 
 fn check_combo_max_num<'de, D>(deserializer: D) -> Result<usize, D::Error>
@@ -327,9 +344,13 @@ impl Default for RmkConstantsConfig {
             flash_channel_size: 4,
             split_peripherals_num: 0,
             ble_profiles_num: 3,
+            split_pairing_timeout_seconds: 0,
+            ble_reconnect_timeout_seconds: 300,
+            ble_pairing_timeout_seconds: 0,
             split_central_sleep_timeout_seconds: 0,
             protocol_max_bulk_size: 8,
             protocol_macro_chunk_size: 64,
+            auto_mouse_layer_max_num: None,
         }
     }
 }
@@ -388,6 +409,7 @@ macro_rules! define_event_config {
 define_event_config!(
     // Connection events
     connection_status_change,
+    ble_advertising_mode,
     // Input events
     modifier,
     keyboard,
@@ -405,6 +427,7 @@ define_event_config!(
     // Split events
     peripheral_connected,
     central_connected,
+    split_connection_state,
     peripheral_battery,
     peripheral_battery_refresh,
     peripheral_settings,
@@ -644,6 +667,15 @@ pub(crate) struct AutoMouseLayerConfig {
     /// Minimum absolute axis delta required to be considered as motion.
     /// Defaults to `1` (any motion). Helpful to filter out sensor noise.
     pub threshold: Option<u16>,
+    /// When `true`, non-mouse key presses deactivate `target_layer` immediately (mouse HID keys and `extra_mouse_keys` excepted).
+    /// Macro-emitted keycodes, `Again`/`Repeat`, and `GraveEscape` cannot be classified and never deactivate the layer.
+    pub deactivate_on_key: Option<bool>,
+    /// Extra keycodes (e.g. modifiers) that do not trigger deactivation when `deactivate_on_key` is set.
+    /// Modifier keycodes listed here also exempt modifier-only actions containing them.
+    pub extra_mouse_keys: Option<Vec<String>>,
+    /// When `true`, key presses that do NOT deactivate `target_layer` extend the timeout deadline
+    /// (i.e. reset it to now + `timeout`) at the moment the key's action resolves.
+    pub reset_timeout_on_key: Option<bool>,
 }
 
 /// Per Key configurations profiles for morse, tap-hold, etc.
@@ -852,6 +884,14 @@ pub struct SplitBoardConfig {
     pub adc_divider_total: Option<u32>,
     /// Output Pin config for the split
     pub output: Option<Vec<OutputConfig>>,
+    /// Path to the peripheral firmware binary for automatic dfu_split update.
+    /// Relative to the project's `Cargo.toml`.  When set, the generated code
+    /// includes the binary with `include_bytes!` and registers it via
+    /// [`set_firmware_update_data`](crate::set_firmware_update_data).
+    pub firmware: Option<String>,
+    /// DFU update policy for this peripheral. "MatchHash" (default) only
+    /// flashes when the firmware differs; "force" always flashes.
+    pub update_policy: Option<String>,
 }
 
 /// Serial port config

@@ -4,10 +4,10 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-export RUST_MIN_STACK="${RUST_MIN_STACK:-16777216}"
+export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
 
 if [[ -z "${BINDGEN_EXTRA_CLANG_ARGS:-}" ]]; then
-    clang_args=(--target=arm-none-eabi)
+    clang_args=(-ffreestanding --target=arm-none-eabi)
 
     if command -v arm-none-eabi-gcc >/dev/null 2>&1; then
         sysroot="$(arm-none-eabi-gcc -print-sysroot 2>/dev/null || true)"
@@ -51,6 +51,11 @@ if [[ -z "${BINDGEN_EXTRA_CLANG_ARGS:-}" ]]; then
         fi
     fi
 
+    host_gcc_include="$(gcc -print-file-name=include 2>/dev/null || true)"
+    if [[ -n "$host_gcc_include" && -d "$host_gcc_include" ]]; then
+        clang_args+=("-I$host_gcc_include")
+    fi
+
     export BINDGEN_EXTRA_CLANG_ARGS="${clang_args[*]}"
 fi
 
@@ -74,17 +79,50 @@ build_split() {
     run "keyboards/$keyboard" cargo build --release "${bins[@]}"
 }
 
+build_k04_series_profile() {
+    local profile="$1"
+    local keyboard_toml="$2"
+    local vial_json="$3"
+    local bins=(--bin central --bin peripheral --bin hardreset)
+
+    run "keyboards/k04" env \
+        "CARGO_TARGET_DIR=target/$profile" \
+        "KEYBOARD_TOML_PATH=$repo_root/keyboards/k04/$keyboard_toml" \
+        "VIAL_JSON_PATH=$repo_root/keyboards/k04/$vial_json" \
+        cargo build --release "${bins[@]}"
+}
+
 build_qube() {
     local keyboard="$1"
     run "keyboards/$keyboard" env CARGO_TARGET_DIR=target/qube cargo build --release --bin qube --features qube
     run "keyboards/$keyboard" env CARGO_TARGET_DIR=target/halves cargo build --release --bin left --bin right
 }
 
+build_k04_qube_profile() {
+    local profile="$1"
+    local keyboard_toml="$2"
+    local vial_json="$3"
+
+    run "keyboards/k04_qube" env \
+        "CARGO_TARGET_DIR=target/$profile/qube" \
+        "KEYBOARD_TOML_PATH=$repo_root/keyboards/k04_qube/$keyboard_toml" \
+        "VIAL_JSON_PATH=$repo_root/keyboards/k04_qube/$vial_json" \
+        cargo build --release --bin qube --features qube
+    run "keyboards/k04_qube" env \
+        "CARGO_TARGET_DIR=target/$profile/halves" \
+        "KEYBOARD_TOML_PATH=$repo_root/keyboards/k04_qube/$keyboard_toml" \
+        "VIAL_JSON_PATH=$repo_root/keyboards/k04_qube/$vial_json" \
+        cargo build --release --bin left --bin right
+}
+
 echo "Using BINDGEN_EXTRA_CLANG_ARGS=$BINDGEN_EXTRA_CLANG_ARGS"
 
-build_split k04
-build_split k04_mini
-build_split k04_micro
+build_k04_series_profile k04 keyboard.toml vial.json
+build_k04_series_profile mini keyboard_mini.toml vial_mini.json
+build_k04_series_profile micro keyboard_micro.toml vial_micro.json
+build_k04_qube_profile k04 keyboard.toml vial.json
+build_k04_qube_profile mini keyboard_mini.toml vial_mini.json
+build_k04_qube_profile micro keyboard_micro.toml vial_micro.json
 build_split op36
 build_split k03
 build_split imperial44
@@ -93,7 +131,6 @@ build_split velvet_ui
 run "keyboards/trackball_v30" cargo build --release --bin keyboard
 run "keyboards/trackball_v31" cargo build --release --bin keyboard
 run "keyboards/trackball_royale" cargo build --release --bin keyboard
-build_qube k04_qube
 build_qube op36_qube
 
 echo

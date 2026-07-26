@@ -1443,6 +1443,7 @@ dependencies = [
  "rmk",
  "rmk-types",
  "static_cell",
+ "u8g2-fonts",
  "xz2",
 ]
 
@@ -2481,7 +2482,7 @@ dependencies = [
 [[package]]
 name = "trouble-host"
 version = "0.7.0"
-source = "git+https://github.com/embassy-rs/trouble?rev=71fb54c217ab139c47f3f0dd54e5bac1b8941d31#71fb54c217ab139c47f3f0dd54e5bac1b8941d31"
+source = "git+https://github.com/embassy-rs/trouble?rev=c21b1239fb86de712fc99da803def88378d81177#c21b1239fb86de712fc99da803def88378d81177"
 dependencies = [
  "aes",
  "bt-hci",
@@ -2506,7 +2507,7 @@ dependencies = [
 [[package]]
 name = "trouble-host-macros"
 version = "0.5.0"
-source = "git+https://github.com/embassy-rs/trouble?rev=71fb54c217ab139c47f3f0dd54e5bac1b8941d31#71fb54c217ab139c47f3f0dd54e5bac1b8941d31"
+source = "git+https://github.com/embassy-rs/trouble?rev=c21b1239fb86de712fc99da803def88378d81177#c21b1239fb86de712fc99da803def88378d81177"
 dependencies = [
  "convert_case 0.8.0",
  "darling 0.20.11",
@@ -2527,6 +2528,16 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "u8g2-fonts"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "132e15484caa39440cc9d6317c1f1980a13259234e630db2270ea2a2b1e5c4a2"
+dependencies = [
+ "embedded-graphics",
+ "embedded-graphics-core",
+]
 
 [[package]]
 name = "ucd-trie"

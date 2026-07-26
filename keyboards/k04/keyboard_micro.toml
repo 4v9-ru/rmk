@@ -163,7 +163,7 @@ ble_profiles_num = 5
 # 0xEC000..0xF4000 remains reserved by the board/bootloader layout.
 start_addr = 0xCC000
 num_sectors = 32
-clear_storage = false
+clear_storage = true
 # Preserve the Vial/Entropy keymap. Use settings_reset once when changing
 # between K:04 Series profiles.
-clear_layout = false
+clear_layout = true

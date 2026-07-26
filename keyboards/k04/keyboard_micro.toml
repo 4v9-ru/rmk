@@ -167,23 +167,3 @@ clear_storage = false
 # Preserve the Vial/Entropy keymap. Use settings_reset once when changing
 # between K:04 Series profiles.
 clear_layout = false
-
-
-[behavior.mouse_key]
-# ease_in — квадратичная кривая progress = r² / ttm²: первые тики еле ползёшь, к концу разгон.
-# ease_out (дефолт) — progress = (2·r·ttm − r²) / ttm²: резкий старт, плавное выполаживание.
-
-acceleration_curve = "ease_in"
-move_delta = 2          # на сколько пикселей прыгает за один "тик"
-max_speed = 7            # макс ускорение ×5 в тик
-ticks_to_max = 50        # сколько тиков пройдет до упора разгона
-move_max = 30            # максималка пикселей за тик, выше которой не поедет
-initial_delay_ms = 50    # сколько ждать перед первым движением
-repeat_interval_ms = 7   # время одного тика, при зажатой кнопке. 8ms = много тиков, 40ms = лениво.
-
-wheel_delta = 1
-wheel_max_speed = 1
-wheel_ticks_to_max = 1
-wheel_max = 1
-wheel_initial_delay_ms = 50
-wheel_repeat_interval_ms = 70

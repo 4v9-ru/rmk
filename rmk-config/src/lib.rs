@@ -431,6 +431,7 @@ define_event_config!(
     peripheral_battery,
     peripheral_battery_refresh,
     peripheral_settings,
+    peripheral_settings_refresh,
     clear_peer,
     // DFU events
     dfu_status,
@@ -445,6 +446,7 @@ pub(crate) struct LayoutTomlConfig {
     pub rows: u8,
     pub cols: u8,
     pub layers: u8,
+    pub no_action_layer_start: Option<u8>,
     pub keymap: Option<Vec<Vec<Vec<String>>>>, // Will be deprecated in the future
     pub matrix_map: Option<String>,            // Temporarily allow both matrix_map and keymap to be set
     pub encoder_map: Option<Vec<Vec<[String; 2]>>>, // Will be deprecated together with keymap

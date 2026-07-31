@@ -2,13 +2,15 @@ use core::str;
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use rmk::config::{VialDeviceSettings, VialDeviceSettingsData};
-use rmk::event::{publish_event, PeripheralSettingsEvent};
+use rmk::event::{publish_event, PeripheralSettingsEvent, PeripheralSettingsRefreshEvent};
+use rmk::macros::processor;
 
 pub const LAYER_NAME_COUNT: usize = 16;
 pub const LAYER_NAME_MAX: usize = 12;
 const LAYER_NAME_QSID_BASE: u16 = 200;
 const STORAGE_MARKER: u8 = 0xE4;
-const STORAGE_VERSION: u8 = 2;
+const STORAGE_VERSION: u8 = 3;
+const PREVIOUS_STORAGE_VERSION: u8 = 2;
 const LEGACY_STORAGE_VERSION: u8 = 1;
 const STORAGE_HEADER_LEN: usize = 2;
 const MODULE_STORAGE_OFFSET: usize = STORAGE_HEADER_LEN;
@@ -254,16 +256,24 @@ fn serialize() -> VialDeviceSettingsData {
 
 fn deserialize(bytes: &[u8]) {
     if bytes.first() == Some(&STORAGE_MARKER) {
-        let layer_names_offset = match bytes.get(1).copied() {
-            Some(STORAGE_VERSION) if bytes.len() >= LAYER_NAMES_STORAGE_OFFSET => Some(LAYER_NAMES_STORAGE_OFFSET),
+        let profile = match bytes.get(1).copied() {
+            Some(STORAGE_VERSION) if bytes.len() >= LAYER_NAMES_STORAGE_OFFSET => {
+                Some((LAYER_NAMES_STORAGE_OFFSET, false))
+            }
+            Some(PREVIOUS_STORAGE_VERSION) if bytes.len() >= LAYER_NAMES_STORAGE_OFFSET => {
+                Some((LAYER_NAMES_STORAGE_OFFSET, true))
+            }
             Some(LEGACY_STORAGE_VERSION) if bytes.len() >= LEGACY_LAYER_NAMES_STORAGE_OFFSET => {
-                Some(LEGACY_LAYER_NAMES_STORAGE_OFFSET)
+                Some((LEGACY_LAYER_NAMES_STORAGE_OFFSET, true))
             }
             _ => None,
         };
-        if let Some(layer_names_offset) = layer_names_offset {
+        if let Some((layer_names_offset, migrate_placeholders)) = profile {
             deserialize_module_settings(&bytes[MODULE_STORAGE_OFFSET..layer_names_offset]);
             deserialize_compact_layer_names(&bytes[layer_names_offset..]);
+            if migrate_placeholders {
+                migrate_legacy_placeholders();
+            }
             LAYER_NAMES_VERSION.fetch_add(1, Ordering::Relaxed);
             publish_module_settings();
             return;
@@ -272,6 +282,7 @@ fn deserialize(bytes: &[u8]) {
 
     deserialize_module_settings(&[]);
     deserialize_fixed_layer_names(bytes);
+    migrate_legacy_placeholders();
     LAYER_NAMES_VERSION.fetch_add(1, Ordering::Relaxed);
     publish_module_settings();
 }
@@ -336,6 +347,20 @@ fn store_raw_layer_name(index: usize, bytes: &[u8]) {
 fn clear_layer_names() {
     for index in 0..LAYER_NAME_COUNT {
         store_raw_layer_name(index, &[]);
+    }
+}
+
+fn migrate_legacy_placeholders() {
+    let mut bytes = [0u8; LAYER_NAME_MAX];
+    for (index, default_name) in crate::DEFAULT_LAYER_NAMES.iter().enumerate() {
+        let len = LAYER_NAME_LEN[index].load(Ordering::Acquire).min(LAYER_NAME_MAX as u8) as usize;
+        let base = index * LAYER_NAME_MAX;
+        for (offset, byte) in bytes.iter_mut().enumerate() {
+            *byte = LAYER_NAME_BYTES[base + offset].load(Ordering::Relaxed);
+        }
+        if crate::default_layer_names::is_legacy_placeholder(index, &bytes[..len]) {
+            store_raw_layer_name(index, default_name.as_bytes());
+        }
     }
 }
 
@@ -425,10 +450,31 @@ fn module_set_setting(qsid: u16, data: &[u8]) -> bool {
 
 pub fn publish_module_settings() {
     publish_event(PeripheralSettingsEvent(module_settings_sync_packet()));
+    #[cfg(not(feature = "qube"))]
     publish_event(PeripheralSettingsEvent(module_profile_settings_sync_packet()));
     publish_event(PeripheralSettingsEvent(module_encoder_settings_sync_packet()));
 }
 
+/// Re-sends the settings snapshot whenever a half's link comes up.
+///
+/// The halves keep their settings in RAM only, so one that reboots on its own
+/// runs on hardcoded defaults — touch gestures off, encoder steps at 1 — until
+/// something republishes them. Without this the next Vial edit was the only
+/// thing that could heal it.
+#[processor(subscribe = [PeripheralSettingsRefreshEvent])]
+pub struct ModuleSettingsBroadcast;
+
+impl ModuleSettingsBroadcast {
+    pub fn new() -> Self {
+        Self
+    }
+
+    async fn on_peripheral_settings_refresh_event(&mut self, _event: PeripheralSettingsRefreshEvent) {
+        publish_module_settings();
+    }
+}
+
+#[cfg(not(feature = "qube"))]
 fn module_profile_settings_sync_packet() -> [u8; MODULE_SETTINGS_SYNC_LEN] {
     let mut data = [0u8; MODULE_SETTINGS_SYNC_LEN];
     data[0] = MODULE_SETTINGS_VERSION | 0x80;

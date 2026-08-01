@@ -116,6 +116,18 @@ pub struct PointingEvent {
     pub axes: [AxisEvent; 3],
 }
 
+impl PointingEvent {
+    /// Whether this event contains relative X/Y cursor motion at or above
+    /// `threshold`. Absolute axes and scroll-only reports do not count.
+    pub fn has_relative_xy_motion(&self, threshold: u16) -> bool {
+        self.axes.iter().any(|axis| {
+            matches!(axis.typ, AxisValType::Rel)
+                && matches!(axis.axis, Axis::X | Axis::Y)
+                && axis.value.unsigned_abs() >= threshold
+        })
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Copy, MaxSize)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct AxisEvent {
@@ -166,4 +178,32 @@ pub struct PointingSetCpiEvent {
 pub struct PointingProcessorEvent {
     pub device_id: u8,
     pub mode: PointingMode,
+}
+
+/// Runtime transform applied by a pointing processor after its static hardware
+/// transform and before mode-specific processing.
+#[event(channel_size = 8, pubs = 2, subs = 2)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct PointingTransformEvent {
+    pub device_id: u8,
+    /// Quarter-turns clockwise in the logical coordinate space (`0..=3`).
+    pub rotation: u8,
+    pub acceleration: bool,
+}
+
+/// Runtime override for one configured auto-mouse-layer entry.
+///
+/// The entry must already exist in `[behavior.auto_mouse_layer]`; this event
+/// updates the fields that settings UIs commonly expose without creating a
+/// second layer-timer implementation in keyboard-specific code.
+#[event(channel_size = 4, pubs = 2, subs = 1)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct AutoMouseLayerConfigEvent {
+    pub device_id: u8,
+    pub enabled: bool,
+    pub target_layer: u8,
+    pub timeout_ms: u32,
+    pub threshold: u16,
 }

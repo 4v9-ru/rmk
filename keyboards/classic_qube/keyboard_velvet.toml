@@ -44,6 +44,9 @@ layer_change.channel_size = 4
 layer_change.subs = 6
 modifier.channel_size = 8
 modifier.subs = 6
+# VelvetSettingsBroadcast owns the persistent pointing snapshot and listens for
+# a refresh whenever the right half reconnects. This event is opt-in in RMK.
+peripheral_settings_refresh.subs = 1
 
 [split]
 connection = "ble"
@@ -91,9 +94,20 @@ spi.miso = "P0_17"
 spi.cs = "P0_13"
 motion = "P0_15"
 cpi = 1000
+# Keep the same proven PMW3610 tracking path as Velvet Standalone.
+smart_mode = true
+report_hz = 125
 swap_xy = true
 invert_x = true
 invert_y = true
+
+# The generic RMK runner owns activation and its exact deadline. Velvet
+# settings update this entry at runtime (enabled modes, layer and timeout).
+[[behavior.auto_mouse_layer]]
+device_id = 0
+target_layer = 4
+timeout = "500ms"
+threshold = 2
 
 [layout]
 rows = 8
@@ -153,9 +167,3 @@ _  User11 MouseBtn3  MouseBtn2  MouseBtn1  User10  User10  MouseBtn1  MouseBtn2 
 _  _      _          _          _          User12  User12  _          _          _          _       _
         _  _  _  _  _  _  _  _  _  _
 """
-
-[[behavior.auto_mouse_layer]]
-device_id = 0
-target_layer = 4
-timeout = "350ms"
-threshold = 1

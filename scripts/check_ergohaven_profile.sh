@@ -442,10 +442,10 @@ mapfile -t build_scripts < <(
         done
 )
 for file in "${build_scripts[@]}"; do
-    rg -q 'const FIRMWARE_VERSION: &str = "0\.1\.3";' "$file" \
-        || fail "$file: firmware version must be 0.1.3"
-    rg -q 'const FIRMWARE_VERSION_BCD: &str = "0x0103";' "$file" \
-        || fail "$file: BCD firmware version must be 0x0103"
+    rg -q 'const FIRMWARE_VERSION: &str = "0\.1\.4";' "$file" \
+        || fail "$file: firmware version must be 0.1.4"
+    rg -q 'const FIRMWARE_VERSION_BCD: &str = "0x0104";' "$file" \
+        || fail "$file: BCD firmware version must be 0x0104"
 done
 
 mapfile -t vial_definitions < <(
@@ -457,8 +457,8 @@ mapfile -t vial_definitions < <(
 for file in "${vial_definitions[@]}"; do
     jq -e '.manufacturer == "Ergohaven"' "$file" >/dev/null \
         || fail "$file: manufacturer must be Ergohaven"
-    jq -e '.firmware.version == "0.1.3" and .firmwareVersion == "0.1.3"' "$file" >/dev/null \
-        || fail "$file: both firmware versions must be 0.1.3"
+    jq -e '.firmware.version == "0.1.4" and .firmwareVersion == "0.1.4"' "$file" >/dev/null \
+        || fail "$file: both firmware versions must be 0.1.4"
 done
 
 for file in "${vial_definitions[@]}"; do
@@ -616,14 +616,59 @@ for directory in keyboards/trackball_v30 keyboards/trackball_v31 keyboards/track
     fi
 done
 
+[[ "$(rg -c '^\[\[split\.central\.input_device\.pmw3610\]\]$' keyboards/velvet/keyboard.toml)" == "1" ]] \
+    || fail "keyboards/velvet/keyboard.toml: right central must own one optional PMW3610"
+[[ "$(rg -c '^\[\[split\.peripheral\.input_device\.pmw3610\]\]$' keyboards/classic_qube/keyboard_velvet.toml)" == "1" ]] \
+    || fail "keyboards/classic_qube/keyboard_velvet.toml: right peripheral must own one optional PMW3610"
 for file in keyboards/velvet/keyboard.toml keyboards/classic_qube/keyboard_velvet.toml; do
-    [[ "$(rg -c '^\[\[split\.peripheral\.input_device\.pmw3610\]\]$' "$file")" == "1" ]] \
-        || fail "$file: unified Velvet must define one optional PMW3610"
     [[ "$(rg -c '^\[\[behavior\.auto_mouse_layer\]\]$' "$file")" == "1" ]] \
-        || fail "$file: unified Velvet must define one auto Mouse layer"
+        || fail "$file: persistent Velvet settings require one runtime-configurable auto Mouse entry"
     [[ "$(rg -c '^name = "Mouse"$' "$file")" == "1" ]] \
         || fail "$file: unified Velvet must define one Mouse factory layer"
 done
+
+python3 - <<'PY' || fail "Velvet pointing runtime contract drifted"
+import tomllib
+
+for path in (
+    "keyboards/velvet/keyboard.toml",
+    "keyboards/classic_qube/keyboard_velvet.toml",
+):
+    with open(path, "rb") as source:
+        config = tomllib.load(source)
+    refresh_subs = config["event"]["peripheral_settings_refresh"]["subs"]
+    assert refresh_subs == 1, (
+        f"{path}: event.peripheral_settings_refresh.subs={refresh_subs}, expected 1"
+    )
+    if path == "keyboards/velvet/keyboard.toml":
+        layer_subs = config["event"]["layer_change"]["subs"]
+        assert layer_subs >= 3, (
+            f"{path}: event.layer_change.subs={layer_subs}, expected at least 3 "
+            "for auto Mouse, Velvet mode, and the split manager"
+        )
+        central = config["split"]["central"]
+        peripheral = config["split"]["peripheral"][0]
+        assert central["row_offset"] == 4, f"{path}: right half must be central"
+        assert peripheral["row_offset"] == 0, f"{path}: left half must be peripheral"
+        devices = [central]
+    else:
+        devices = config["split"]["peripheral"]
+    pointing = [
+        sensor
+        for peripheral in devices
+        for sensor in peripheral.get("input_device", {}).get("pmw3610", [])
+    ]
+    assert len(pointing) == 1, f"{path}: expected one PMW3610, found {len(pointing)}"
+    assert pointing[0]["smart_mode"] is True, f"{path}: PMW3610 smart_mode must be true"
+    assert pointing[0]["report_hz"] == 125, f"{path}: PMW3610 report_hz must be 125"
+    auto_mouse = config["behavior"]["auto_mouse_layer"]
+    assert auto_mouse == [{
+        "device_id": 0,
+        "target_layer": 4,
+        "timeout": "500ms",
+        "threshold": 2,
+    }], f"{path}: runtime-configurable auto Mouse seed drifted: {auto_mouse!r}"
+PY
 
 actual_velvet_modes="$(jq -r '.customKeycodes[10:13] | map(.name) | join(",")' keyboards/velvet/vial.json)"
 if [[ "$actual_velvet_modes" != "EH_SNP,EH_SCR,EH_TXT" ]]; then
@@ -633,10 +678,26 @@ jq -e '
     .productId == "0x00BE"
     and .layouts.labels == ["Right trackball instead of key"]
     and ([.layouts.keymap[][] | select(type == "string")] | index("7,1\n\n\n0,0") != null)
+    and ([.settings[].fields[].qsid] | sort == [
+        121, 127, 128, 129, 131, 135, 138, 139, 141, 142, 143, 144, 145, 146, 148, 324, 328, 330, 334
+    ])
 ' keyboards/velvet/vial.json >/dev/null \
-    || fail "keyboards/velvet/vial.json: unified right key/trackball layout option drifted"
-rg -Fq '#[path = "../../common/velvet_pointing_mode.rs"]' keyboards/velvet/src/central.rs \
-    || fail "keyboards/velvet/src/central.rs: shared Velvet pointing-mode owner is missing"
+    || fail "keyboards/velvet/vial.json: unified layout or backed trackball settings drifted"
+rg -Fq '#[path = "../../common/velvet_pointing.rs"]' keyboards/velvet/src/central.rs \
+    || fail "keyboards/velvet/src/central.rs: shared Velvet pointing owner is missing"
+rg -Fq '#[path = "../../common/velvet_device_settings.rs"]' keyboards/velvet/src/central.rs \
+    || fail "keyboards/velvet/src/central.rs: persistent Velvet settings owner is missing"
+rg -Fq 'crate::velvet_pointing::VelvetPointingSettingsSync' keyboards/velvet/src/central.rs \
+    || fail "keyboards/velvet/src/central.rs: right-central PMW3610 settings sync is missing"
+rg -Fq 'AutoMouseLayerConfigEvent' keyboards/common/velvet_pointing.rs \
+    || fail "keyboards/common/velvet_pointing.rs: persistent settings no longer update the generic auto Mouse runner"
+if rg -q 'VelvetPointingSettingsSync|velvet_pointing.rs' keyboards/velvet/src/peripheral.rs; then
+    fail "keyboards/velvet/src/peripheral.rs: left peripheral must not own PMW3610 settings"
+fi
+rg -Fq 'crate::velvet_device_settings::vial_device_settings' keyboards/velvet/build.rs \
+    || fail "keyboards/velvet/build.rs: standalone Velvet settings provider is missing"
+rg -Fq 'crate::velvet_device_settings::vial_device_settings' keyboards/classic_qube/build.rs \
+    || fail "keyboards/classic_qube/build.rs: Qube Velvet settings provider is missing"
 rg -Fq '#[cfg(velvet_pointing)]' keyboards/classic_qube/src/qube.rs \
     || fail "keyboards/classic_qube/src/qube.rs: Velvet-only Qube pointing-mode registration is missing"
 

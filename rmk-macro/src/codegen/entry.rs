@@ -133,11 +133,26 @@ pub(crate) fn rmk_entry_select(
                     let col = p.cols;
                     let row_offset = p.row_offset;
                     let col_offset = p.col_offset;
+                    // A 125 Hz source needs one connection event per 8 ms
+                    // report. Select that cadence only for the peripheral
+                    // that owns the pointing device; key-only links retain
+                    // the standard 15 ms profile instead of doubling Qube's
+                    // total radio load.
+                    let split_link_profile = if p
+                        .input_device
+                        .as_ref()
+                        .is_some_and(|devices| devices.has_pointing_device())
+                    {
+                        quote! { ::rmk::split::ble::central::SplitLinkProfile::Pointing }
+                    } else {
+                        quote! { ::rmk::split::ble::central::SplitLinkProfile::Keyboard }
+                    };
                     tasks.push(quote! {
-                        ::rmk::split::central::run_peripheral_manager::<#row, #col, #row_offset, #col_offset, _>(
+                        ::rmk::split::central::run_peripheral_manager_with_profile::<#row, #col, #row_offset, #col_offset, _>(
                             #idx,
                             &peripheral_addrs,
                             &stack,
+                            #split_link_profile,
                         )
                     });
                 });

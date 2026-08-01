@@ -18,8 +18,8 @@ use std::{env, fs};
 use xz2::read::XzEncoder;
 
 fn main() {
-    const FIRMWARE_VERSION: &str = "0.1.3";
-    const FIRMWARE_VERSION_BCD: &str = "0x0103";
+    const FIRMWARE_VERSION: &str = "0.1.4";
+    const FIRMWARE_VERSION_BCD: &str = "0x0104";
 
     let vial_path = configured_path("VIAL_JSON_PATH", "vial.json");
     let keyboard_path = configured_path("KEYBOARD_TOML_PATH", "keyboard.toml");
@@ -32,13 +32,18 @@ fn main() {
     println!("cargo:rerun-if-changed=memory_qube.x");
     println!("cargo:rustc-env=RMK_FIRMWARE_VERSION={FIRMWARE_VERSION}");
     println!("cargo:rustc-env=RMK_FIRMWARE_VERSION_BCD={FIRMWARE_VERSION_BCD}");
-    println!("cargo:rustc-env=RMK_VIAL_DEVICE_SETTINGS_FN=crate::layer_names::vial_device_settings");
     println!("cargo:rustc-check-cfg=cfg(velvet_pointing)");
 
     // Put `memory.x` in our output directory and ensure it's
     // on the linker search path.
     let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let product_id = generate_vial_config(&vial_path);
+    let settings_fn = if product_id == 0x00BE {
+        "crate::velvet_device_settings::vial_device_settings"
+    } else {
+        "crate::layer_names::vial_device_settings"
+    };
+    println!("cargo:rustc-env=RMK_VIAL_DEVICE_SETTINGS_FN={settings_fn}");
     generate_qube_profile(product_id, out);
 
     let memory = if env::var_os("CARGO_FEATURE_QUBE").is_some() {

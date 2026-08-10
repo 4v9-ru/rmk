@@ -1,10 +1,7 @@
-use core::cell::Cell;
-
 use bt_hci::cmd::le::{LeReadLocalSupportedFeatures, LeReadPhy, LeSetPhy};
 use bt_hci::controller::{ControllerCmdAsync, ControllerCmdSync};
-use embassy_futures::join::join;
+use embassy_futures::join::join3;
 use embassy_futures::select::{Either, Either3, select, select3};
-use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 use embassy_sync::mutex::Mutex;
 #[cfg(feature = "host")]
 use embassy_sync::signal::Signal;
@@ -24,13 +21,12 @@ use crate::ble::led::BleLedReader;
 #[cfg(feature = "passkey_entry")]
 use crate::ble::passkey::{PasskeyInputState, next_gatt_event};
 use crate::ble::profile::{ProfileInfo, ProfileManager, UPDATED_CCCD_TABLE, UPDATED_PROFILE};
+use crate::ble::sleep::{report_activity, request_sleep, wait_for_input_activity};
 use crate::channel::{BLE_REPORT_CHANNEL, LED_SIGNAL};
 use crate::config::{BleBatteryConfig, RmkConfig};
 use crate::core_traits::Runnable;
-use crate::event::{BleAdvertisingMode, SleepStateEvent, SubscribableEvent, publish_event};
+use crate::event::BleAdvertisingMode;
 use crate::hid::{HidWriterTrait, run_led_reader};
-#[cfg(feature = "split")]
-use crate::split::ble::central::{request_sleep, update_activity_time};
 use crate::state::set_ble_state;
 
 pub(crate) mod battery_service;
@@ -41,23 +37,7 @@ pub(crate) mod led;
 pub(crate) mod nrf;
 pub mod passkey;
 pub(crate) mod profile;
-
-/// Global state of sleep management
-/// - `true`: Indicates central is sleeping
-/// - `false`: Indicates central is awake
-static SLEEPING_STATE: BlockingMutex<crate::RawMutex, Cell<bool>> = BlockingMutex::new(Cell::new(false));
-
-pub(crate) fn is_sleeping() -> bool {
-    SLEEPING_STATE.lock(Cell::get)
-}
-
-pub(crate) fn replace_sleeping_state(next: bool) -> bool {
-    SLEEPING_STATE.lock(|state| {
-        let previous = state.get();
-        state.set(next);
-        previous
-    })
-}
+pub(crate) mod sleep;
 
 /// Max number of connections
 pub(crate) const CONNECTIONS_MAX: usize = crate::SPLIT_PERIPHERALS_NUM + 1;
@@ -270,19 +250,13 @@ where
                         }
 
                         warn!("Advertising timeout, sleep and wait for any key");
-                        publish_event(SleepStateEvent::new(true));
-
-                        #[cfg(feature = "split")]
                         request_sleep();
 
-                        // Wake on key or pointing activity after the advertising timeout.
-                        let mut key_wake = crate::event::KeyboardEvent::subscriber();
-                        let mut pointing_wake = crate::event::PointingEvent::subscriber();
-                        let _ = select(key_wake.next_message_pure(), pointing_wake.next_message_pure()).await;
+                        // Wake on a key or meaningful pointing activity after
+                        // the advertising timeout; ignore sensor settling noise.
+                        wait_for_input_activity().await;
 
-                        #[cfg(feature = "split")]
-                        update_activity_time();
-                        publish_event(SleepStateEvent::new(false));
+                        report_activity();
                     }
                     Either::First(Err(e)) => {
                         #[cfg(feature = "defmt")]
@@ -300,7 +274,10 @@ where
             }
         };
 
-        join(ble_task(runner), connection_loop).await;
+        // Sleep ownership must outlive every host and split connection. Keeping
+        // it beside the BLE runner prevents a disconnected link from leaving
+        // the keyboard latched asleep.
+        join3(ble_task(runner), connection_loop, sleep::run_sleep_manager()).await;
         unreachable!("BleTransport sub-tasks must run forever")
     }
 }
@@ -439,18 +416,15 @@ async fn gatt_events_task(server: &Server<'_>, conn: &GattConnection<'_, '_, Def
                             cccd_updated = true;
                         } else if event.handle() == hid_control_point.handle {
                             info!("Write GATT Event to Control Point: {:?}", event.handle());
-                            #[cfg(feature = "split")]
-                            {
-                                // Forward an HID Control Point write to the split central's sleep signal.
-                                // HID Class spec opcodes for the HID Control Point characteristic:
-                                //   - 0: HID_CTRL_SUSPEND
-                                //   - 1: HID_CTRL_EXIT_SUSPEND
-                                if data_len == 1 {
-                                    match data[0] {
-                                        0 => request_sleep(),
-                                        1 => update_activity_time(),
-                                        _ => {}
-                                    }
+                            // Forward HID suspend/resume to the persistent sleep manager.
+                            // HID Class control point opcodes:
+                            //   - 0: HID_CTRL_SUSPEND
+                            //   - 1: HID_CTRL_EXIT_SUSPEND
+                            if data_len == 1 {
+                                match data[0] {
+                                    0 => request_sleep(),
+                                    1 => report_activity(),
+                                    _ => {}
                                 }
                             }
                         } else {
@@ -509,8 +483,7 @@ async fn gatt_events_task(server: &Server<'_>, conn: &GattConnection<'_, '_, Def
                 if cccd_updated {
                     // When macOS wakes up from sleep mode, it won't send EXIT SUSPEND command
                     // So we need to monitor the sleep state by using CCCD write event
-                    #[cfg(feature = "split")]
-                    update_activity_time();
+                    report_activity();
 
                     if let Some(table) = server.get_client_att_table(conn.raw())
                         && let Ok(bytes) = heapless::Vec::from_slice(table.raw())
@@ -642,15 +615,17 @@ async fn advertise<'a, 'b, C: Controller>(
         ..fast_advertise_config
     };
 
-    let reconnect_timeout_ms = u64::from(crate::BLE_RECONNECT_TIMEOUT_SECONDS) * 1_000;
+    let reconnect_timeout_secs = u64::from(crate::BLE_RECONNECT_TIMEOUT_SECONDS);
+    let reconnect_timeout_ms = reconnect_timeout_secs * 1_000;
     let configured_pairing_timeout = u64::from(crate::BLE_PAIRING_TIMEOUT_SECONDS);
-    let mut undirected_timeout_secs = configured_pairing_timeout;
     let has_active_peer = active_peer.is_some();
+    let pairing_window_secs =
+        pairing_window_timeout_secs(has_active_peer, configured_pairing_timeout, reconnect_timeout_secs);
+
+    crate::state::set_ble_advertising_mode(advertising_mode(has_active_peer));
+    set_ble_state(BleState::Advertising);
 
     if let Some(peer) = active_peer {
-        crate::state::set_ble_advertising_mode(BleAdvertisingMode::Reconnecting);
-        set_ble_state(BleState::Advertising);
-
         let high_duty_window_ms = reconnect_timeout_ms.min(DIRECTED_RECONNECT_WINDOW_MS);
         if high_duty_window_ms > 0 {
             info!("[adv] directed high duty reconnect");
@@ -669,7 +644,7 @@ async fn advertise<'a, 'b, C: Controller>(
                     }
                     return Ok(conn);
                 }
-                Ok(Err(error)) if directed_reconnect_should_fallback(&error) => {
+                Ok(Err(error)) if directed_reconnect_should_continue(&error) => {
                     info!("[adv] directed reconnect timed out");
                 }
                 Err(_) => {
@@ -680,7 +655,7 @@ async fn advertise<'a, 'b, C: Controller>(
         }
 
         let remaining_reconnect_ms = reconnect_timeout_ms.saturating_sub(high_duty_window_ms);
-        if configured_pairing_timeout > 0 && remaining_reconnect_ms > 0 {
+        if remaining_reconnect_ms > 0 {
             info!("[adv] directed reconnect");
             let advertiser = peripheral
                 .advertise(
@@ -699,17 +674,17 @@ async fn advertise<'a, 'b, C: Controller>(
                 }
                 Err(_) => info!("[adv] bonded host reconnect timeout"),
             }
-        } else if configured_pairing_timeout == 0 {
-            // Preserve the historical single 300-second advertising phase for
-            // keyboards that have not opted into a separate pairing timeout.
-            undirected_timeout_secs = remaining_reconnect_ms.div_ceil(1_000);
         }
-    } else if undirected_timeout_secs == 0 {
-        undirected_timeout_secs = u64::from(crate::BLE_RECONNECT_TIMEOUT_SECONDS);
+
+        // A bonded profile must never become discoverable for a new host
+        // automatically. Opening a pairing window requires an explicit bond
+        // clear or switching to an unbonded profile.
+        return Err(BleHostError::BleHost(Error::Timeout));
     }
 
-    crate::state::set_ble_advertising_mode(advertising_mode(has_active_peer && configured_pairing_timeout == 0));
-    set_ble_state(BleState::Advertising);
+    let Some(undirected_timeout_secs) = pairing_window_secs else {
+        return Err(BleHostError::BleHost(Error::Timeout));
+    };
 
     if undirected_timeout_secs == 0 {
         return Err(BleHostError::BleHost(Error::Timeout));
@@ -774,7 +749,21 @@ fn advertising_mode(has_active_bond: bool) -> BleAdvertisingMode {
     }
 }
 
-fn directed_reconnect_should_fallback(error: &Error) -> bool {
+fn pairing_window_timeout_secs(
+    has_active_bond: bool,
+    configured_pairing_timeout_secs: u64,
+    reconnect_timeout_secs: u64,
+) -> Option<u64> {
+    if has_active_bond {
+        None
+    } else if configured_pairing_timeout_secs == 0 {
+        Some(reconnect_timeout_secs)
+    } else {
+        Some(configured_pairing_timeout_secs)
+    }
+}
+
+fn directed_reconnect_should_continue(error: &Error) -> bool {
     matches!(error, Error::Timeout)
 }
 
@@ -1077,11 +1066,11 @@ pub(crate) async fn update_conn_params<
     stack: &Stack<'a, C, P>,
     conn: &Connection<'b, P>,
     params: &RequestedConnParams,
-) {
+) -> bool {
     let _guard = BLE_HCI_LINK_UPDATE_MUTEX.lock().await;
     for attempt in 1..=HCI_LINK_UPDATE_ATTEMPTS {
         if !conn.is_connected() {
-            return;
+            return false;
         }
 
         match conn.update_connection_params(stack, params).await {
@@ -1095,17 +1084,19 @@ pub(crate) async fn update_conn_params<
                     continue;
                 } else {
                     error!("[update_conn_params] HCI error: {:?}", error);
+                    return false;
                 }
             }
             Err(e) => {
                 #[cfg(feature = "defmt")]
                 let e = defmt::Debug2Format(&e);
                 error!("[update_conn_params] BLE host error: {:?}", e);
+                return false;
             }
-            _ => (),
+            Ok(_) => return true,
         }
-        return;
     }
+    false
 }
 
 fn is_hci_link_update_busy(status: u8) -> bool {
@@ -1119,7 +1110,6 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use embassy_futures::join::join;
-    use embassy_futures::select::select;
     use embassy_time::{Duration, Timer};
     use rmk_types::battery::{BatteryStatus, ChargeState};
     use rmk_types::ble::{BleState, BleStatus};
@@ -1127,13 +1117,10 @@ mod tests {
     use trouble_host::prelude::PhyKind;
 
     use super::{
-        HostPhyUpdateState, Server, advertising_mode, directed_reconnect_should_fallback, host_phy_update_state,
-        is_hci_link_update_busy, seed_battery_level,
+        HostPhyUpdateState, Server, advertising_mode, directed_reconnect_should_continue, host_phy_update_state,
+        is_hci_link_update_busy, pairing_window_timeout_secs, seed_battery_level, wait_for_input_activity,
     };
-    use crate::event::{
-        Axis, AxisEvent, AxisValType, BleAdvertisingMode, KeyboardEvent, PointingEvent, SubscribableEvent,
-        publish_event,
-    };
+    use crate::event::{Axis, AxisEvent, AxisValType, BleAdvertisingMode, PointingEvent, publish_event};
     use crate::state::{
         current_ble_advertising_mode, current_ble_status, set_ble_advertising_mode, set_ble_profile, set_ble_state,
     };
@@ -1163,9 +1150,24 @@ mod tests {
     }
 
     #[test]
-    fn directed_reconnect_timeout_falls_back_to_undirected_advertising() {
-        assert!(directed_reconnect_should_fallback(&Error::Timeout));
-        assert!(!directed_reconnect_should_fallback(&Error::Disconnected));
+    fn bonded_profile_does_not_open_pairing_window() {
+        assert_eq!(pairing_window_timeout_secs(true, 60, 300), None);
+    }
+
+    #[test]
+    fn unbonded_profile_uses_configured_pairing_window() {
+        assert_eq!(pairing_window_timeout_secs(false, 60, 300), Some(60));
+    }
+
+    #[test]
+    fn unbonded_profile_preserves_legacy_pairing_timeout_fallback() {
+        assert_eq!(pairing_window_timeout_secs(false, 0, 300), Some(300));
+    }
+
+    #[test]
+    fn high_duty_timeout_continues_with_low_duty_reconnect() {
+        assert!(directed_reconnect_should_continue(&Error::Timeout));
+        assert!(!directed_reconnect_should_continue(&Error::Disconnected));
     }
 
     #[test]
@@ -1282,14 +1284,14 @@ mod tests {
     }
 
     #[test]
-    fn wake_activity_includes_pointing_events() {
+    fn wake_activity_ignores_noise_and_accepts_real_pointing() {
         let _guard = ble_status_test_lock().lock().unwrap();
 
         block_on(async {
+            let woke = core::cell::Cell::new(false);
             let wake = async {
-                let mut key_wake = KeyboardEvent::subscriber();
-                let mut pointing_wake = PointingEvent::subscriber();
-                let _ = select(key_wake.next_message_pure(), pointing_wake.next_message_pure()).await;
+                wait_for_input_activity().await;
+                woke.set(true);
             };
             join(wake, async {
                 Timer::after_millis(1).await;
@@ -1312,9 +1314,33 @@ mod tests {
                             value: 0,
                         },
                     ],
-                })
+                });
+                Timer::after_millis(1).await;
+                assert!(!woke.get(), "PMW3610 settling noise must not wake BLE");
+
+                publish_event(PointingEvent {
+                    device_id: 0,
+                    axes: [
+                        AxisEvent {
+                            typ: AxisValType::Rel,
+                            axis: Axis::X,
+                            value: 2,
+                        },
+                        AxisEvent {
+                            typ: AxisValType::Rel,
+                            axis: Axis::Y,
+                            value: 0,
+                        },
+                        AxisEvent {
+                            typ: AxisValType::Rel,
+                            axis: Axis::Z,
+                            value: 0,
+                        },
+                    ],
+                });
             })
             .await;
+            assert!(woke.get());
         });
     }
 }

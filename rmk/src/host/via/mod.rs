@@ -32,6 +32,8 @@ const ERGOHAVEN_CUSTOM_NATIVE_KEY_ACTION: u8 = 0x03;
 const ERGOHAVEN_CUSTOM_NEXT_NATIVE_KEY_ACTION: u8 = 0x04;
 const ERGOHAVEN_NATIVE_KEY_ACTION_VERSION: u8 = 0x01;
 const ERGOHAVEN_NATIVE_KEY_ACTION_CAP_GET_SET: u16 = 0x0001;
+const ERGOHAVEN_NATIVE_KEY_ACTION_CAP_UNIVERSAL_SYMBOLS: u16 = 0x0002;
+const ERGOHAVEN_NATIVE_KEY_ACTION_CAP_RUSSIAN_LETTERS: u16 = 0x0004;
 const NATIVE_KEY_ACTION_STATUS_OK: u8 = 0x00;
 const NATIVE_KEY_ACTION_STATUS_END: u8 = 0x01;
 const NATIVE_KEY_ACTION_STATUS_UNSUPPORTED_VERSION: u8 = 0x02;
@@ -41,6 +43,8 @@ const NATIVE_KEY_ACTION_GET_PAYLOAD_OFFSET: usize = 6;
 const NATIVE_KEY_ACTION_SET_PAYLOAD_OFFSET: usize = 8;
 const NATIVE_KEY_ACTION_NEXT_PAYLOAD_OFFSET: usize = 8;
 const NATIVE_KEY_ACTION_MAX_PAYLOAD: usize = 32 - NATIVE_KEY_ACTION_SET_PAYLOAD_OFFSET;
+const VIAL_MACRO_CHUNK_SIZE: usize = 28;
+const VIAL_MACRO_COUNT: usize = 32;
 
 const _: () = core::assert!(KeyAction::POSTCARD_MAX_SIZE <= NATIVE_KEY_ACTION_MAX_PAYLOAD);
 
@@ -95,6 +99,15 @@ fn init_native_key_action_response(report: &mut ViaReport, subcommand: u8) {
 fn native_key_position_valid(ctx: &KeyboardContext<'_>, layer: u8, row: u8, col: u8) -> bool {
     let (rows, cols, layers) = ctx.keymap_dimensions();
     (layer as usize) < layers && (row as usize) < rows && (col as usize) < cols
+}
+
+const fn native_key_action_capabilities() -> u16 {
+    let capabilities = ERGOHAVEN_NATIVE_KEY_ACTION_CAP_GET_SET;
+    #[cfg(feature = "universal_symbols")]
+    let capabilities = capabilities
+        | ERGOHAVEN_NATIVE_KEY_ACTION_CAP_UNIVERSAL_SYMBOLS
+        | ERGOHAVEN_NATIVE_KEY_ACTION_CAP_RUSSIAN_LETTERS;
+    capabilities
 }
 
 fn encode_native_key_action(report: &mut ViaReport, payload_offset: usize, action: KeyAction) -> bool {
@@ -336,7 +349,7 @@ impl<'a> VialService<'a> {
                     && report.output_data[2] == ERGOHAVEN_CUSTOM_NATIVE_KEY_ACTION_CAPS
                 {
                     init_native_key_action_response(report, ERGOHAVEN_CUSTOM_NATIVE_KEY_ACTION_CAPS);
-                    LittleEndian::write_u16(&mut report.input_data[4..6], ERGOHAVEN_NATIVE_KEY_ACTION_CAP_GET_SET);
+                    LittleEndian::write_u16(&mut report.input_data[4..6], native_key_action_capabilities());
                 } else if report.output_data[1] == ERGOHAVEN_CUSTOM_NAMESPACE
                     && report.output_data[2] == ERGOHAVEN_CUSTOM_NATIVE_KEY_ACTION
                 {
@@ -364,7 +377,7 @@ impl<'a> VialService<'a> {
                 boot::jump_to_bootloader();
             }
             ViaCommand::DynamicKeymapMacroGetCount => {
-                report.input_data[1] = 32;
+                report.input_data[1] = VIAL_MACRO_COUNT as u8;
                 warn!("Macro get count -- to be implemented")
             }
             ViaCommand::DynamicKeymapMacroGetBufferSize => {
@@ -374,7 +387,7 @@ impl<'a> VialService<'a> {
             ViaCommand::DynamicKeymapMacroGetBuffer => {
                 let offset = BigEndian::read_u16(&report.output_data[1..3]) as usize;
                 let size = report.output_data[3] as usize;
-                if size <= 28 {
+                if size <= VIAL_MACRO_CHUNK_SIZE {
                     self.ctx.read_macro_buffer(offset, &mut report.input_data[4..4 + size]);
                     debug!("Get macro buffer: offset: {}, data: {:?}", offset, report.input_data);
                 } else {
@@ -389,18 +402,20 @@ impl<'a> VialService<'a> {
                 // `output_data` is 32 bytes, so the payload slice output_data[4..4 + size]
                 // is only valid for size <= 28. Reject oversized writes instead of
                 // panicking, mirroring the DynamicKeymapMacroGetBuffer handler above.
-                if size <= 28 {
+                if size as usize <= VIAL_MACRO_CHUNK_SIZE {
                     // End of current sequence in the macro cache
                     // The first sequence, reset the macro cache
                     if offset == 0 {
                         self.ctx.reset_macro_buffer();
                     }
 
-                    // Update macro cache + flush full buffer to storage
                     info!("Setting macro buffer, offset: {}, size: {}", offset, size);
-                    self.ctx
-                        .write_macro_buffer(offset as usize, &report.output_data[4..4 + size as usize])
-                        .await;
+                    let transfer_complete = self.ctx.write_macro_buffer(
+                        offset as usize,
+                        &report.output_data[4..4 + size as usize],
+                        VIAL_MACRO_COUNT,
+                    );
+                    info!("Macro transfer complete: {}", transfer_complete);
                 } else {
                     report.input_data[0] = 0xFF;
                 }
@@ -484,6 +499,9 @@ impl Runnable for VialService<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "storage")]
+    use std::sync::{Mutex, OnceLock};
+
     use embassy_futures::block_on;
     use rmk_types::action::{Action, KeyAction};
     use rmk_types::battery::ChargeState;
@@ -493,6 +511,12 @@ mod tests {
     use super::*;
     use crate::config::{BehaviorConfig, PositionalConfig};
     use crate::keymap::{KeyMap, KeymapData};
+
+    #[cfg(feature = "storage")]
+    fn macro_signal_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     /// Build a minimal 1x1x1 keymap + `VialService` and run `f` against it.
     fn with_service<R>(f: impl FnOnce(&mut VialService) -> R) -> R {
@@ -509,14 +533,19 @@ mod tests {
     /// A `DynamicKeymapMacroSetBuffer` (0x0F) report with `offset = 0` and the
     /// given payload `size` byte. The caller mirrors `Runnable::run` by seeding
     /// `input_data` with a copy of `output_data`.
-    fn macro_set_buffer_report(size: u8) -> ViaReport {
+    fn macro_set_buffer_report_at(offset: u16, size: u8) -> ViaReport {
         let mut output_data = [0u8; 32];
         output_data[0] = 0x0F; // DynamicKeymapMacroSetBuffer
+        output_data[1..3].copy_from_slice(&offset.to_be_bytes());
         output_data[3] = size;
         ViaReport {
             input_data: output_data,
             output_data,
         }
+    }
+
+    fn macro_set_buffer_report(size: u8) -> ViaReport {
+        macro_set_buffer_report_at(0, size)
     }
 
     fn custom_report(command: ViaCommand, subcommand: u8) -> ViaReport {
@@ -599,10 +628,87 @@ mod tests {
     // size == 28 is the largest payload that fits (writes output_data[4..32]).
     #[test]
     fn macro_set_buffer_max_size_ok() {
+        #[cfg(feature = "storage")]
+        let _guard = macro_signal_test_lock().lock().unwrap();
+        #[cfg(feature = "storage")]
+        crate::channel::MACRO_FLASH_SIGNAL.reset();
+
         with_service(|service| {
             let mut report = macro_set_buffer_report(28);
             block_on(service.process_via_packet(&mut report));
         });
+
+        #[cfg(feature = "storage")]
+        crate::channel::MACRO_FLASH_SIGNAL.reset();
+    }
+
+    #[cfg(feature = "storage")]
+    #[test]
+    fn macro_chunks_queue_only_the_completed_snapshot() {
+        let _guard = macro_signal_test_lock().lock().unwrap();
+        crate::channel::MACRO_FLASH_SIGNAL.reset();
+
+        with_service(|service| {
+            let mut first = macro_set_buffer_report(28);
+            first.output_data[4..8].fill(0x11);
+            first.output_data[8..32].fill(0);
+            first.input_data = first.output_data;
+            block_on(service.process_via_packet(&mut first));
+            assert!(crate::channel::MACRO_FLASH_SIGNAL.try_take().is_none());
+
+            let mut second = macro_set_buffer_report_at(28, 8);
+            second.output_data[4..12].fill(0);
+            second.input_data = second.output_data;
+            block_on(service.process_via_packet(&mut second));
+
+            let snapshot = crate::channel::MACRO_FLASH_SIGNAL
+                .try_take()
+                .expect("latest macro snapshot");
+            assert_eq!(&snapshot[..4], &[0x11; 4]);
+            assert!(snapshot[4..].iter().all(|byte| *byte == 0));
+        });
+
+        crate::channel::MACRO_FLASH_SIGNAL.reset();
+    }
+
+    #[cfg(feature = "storage")]
+    #[test]
+    fn incomplete_macro_chunk_does_not_copy_a_flash_snapshot() {
+        let _guard = macro_signal_test_lock().lock().unwrap();
+        crate::channel::MACRO_FLASH_SIGNAL.reset();
+
+        with_service(|service| {
+            let mut report = macro_set_buffer_report(28);
+            report.output_data[4..32].fill(0x33);
+            report.input_data = report.output_data;
+            block_on(service.process_via_packet(&mut report));
+
+            assert!(crate::channel::MACRO_FLASH_SIGNAL.try_take().is_none());
+        });
+
+        crate::channel::MACRO_FLASH_SIGNAL.reset();
+    }
+
+    #[cfg(feature = "storage")]
+    #[test]
+    fn macro_chunk_reaching_buffer_end_commits() {
+        let _guard = macro_signal_test_lock().lock().unwrap();
+        crate::channel::MACRO_FLASH_SIGNAL.reset();
+
+        with_service(|service| {
+            let offset = (MACRO_SPACE_SIZE - VIAL_MACRO_CHUNK_SIZE) as u16;
+            let mut report = macro_set_buffer_report_at(offset, VIAL_MACRO_CHUNK_SIZE as u8);
+            report.output_data[4..32].fill(0x44);
+            report.input_data = report.output_data;
+            block_on(service.process_via_packet(&mut report));
+
+            let snapshot = crate::channel::MACRO_FLASH_SIGNAL
+                .try_take()
+                .expect("completed macro snapshot");
+            assert_eq!(&snapshot[MACRO_SPACE_SIZE - VIAL_MACRO_CHUNK_SIZE..], &[0x44; 28]);
+        });
+
+        crate::channel::MACRO_FLASH_SIGNAL.reset();
     }
 
     // size == 29 slices output_data[4..33], which is out of bounds. The sibling
@@ -625,7 +731,7 @@ mod tests {
             assert_eq!(report.input_data[3], ERGOHAVEN_NATIVE_KEY_ACTION_VERSION);
             assert_eq!(
                 LittleEndian::read_u16(&report.input_data[4..6]),
-                ERGOHAVEN_NATIVE_KEY_ACTION_CAP_GET_SET
+                native_key_action_capabilities()
             );
         });
     }

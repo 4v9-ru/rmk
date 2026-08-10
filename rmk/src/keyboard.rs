@@ -14,6 +14,8 @@ use rmk_types::morse::{MorseMode, MorsePattern, TAP};
 use rmk_types::mouse_button::MouseButtons;
 use usbd_hid::descriptor::{MediaKeyboardReport, SystemControlReport};
 
+#[cfg(feature = "_ble")]
+use crate::ble::sleep::report_activity;
 use crate::channel::send_hid_report;
 use crate::core_traits::Runnable;
 use crate::event::{
@@ -27,8 +29,6 @@ use crate::keyboard::mouse::{MouseAction, MouseState};
 use crate::keyboard::oneshot::OneShotState;
 use crate::keyboard_macros::MacroOperation;
 use crate::keymap::KeyMap;
-#[cfg(all(feature = "split", feature = "_ble"))]
-use crate::split::ble::central::update_activity_time;
 use crate::{COMBO_MAX_NUM, FORK_MAX_NUM, MACRO_SPACE_SIZE, boot};
 
 pub(crate) mod auto_mouse_layer;
@@ -239,6 +239,10 @@ pub struct Keyboard<'a> {
     /// Used for temporarily disabling combos
     combo_on: bool,
 
+    /// Firmware-native EN/RU punctuation state.
+    #[cfg(feature = "universal_symbols")]
+    universal_symbols: crate::universal_symbols::State,
+
     /// Plover HID stenography chord accumulator
     #[cfg(feature = "steno")]
     steno: crate::keyboard::steno::StenoChord,
@@ -272,6 +276,8 @@ impl<'a> Keyboard<'a> {
             system_control_report: SystemControlReport { usage_id: 0 },
             last_key_code: HidKeyCode::No,
             combo_on: true,
+            #[cfg(feature = "universal_symbols")]
+            universal_symbols: crate::universal_symbols::State::default(),
             #[cfg(feature = "steno")]
             steno: crate::keyboard::steno::StenoChord::new(),
             #[cfg(feature = "passkey_entry")]
@@ -356,9 +362,9 @@ impl<'a> Keyboard<'a> {
         #[cfg(feature = "host_security")]
         self.keymap.update_matrix_state(&event);
 
-        // Update activity time for BLE split central sleep management
-        #[cfg(all(feature = "split", feature = "_ble"))]
-        update_activity_time();
+        // Feed the one persistent BLE sleep manager on every key transition.
+        #[cfg(feature = "_ble")]
+        report_activity();
 
         // Capture the event time once per event and thread it through.
         let event_time = Instant::now();
@@ -1323,7 +1329,12 @@ impl<'a> Keyboard<'a> {
             Action::Light(_light_action) => warn!("Light controll is not supported"),
             Action::KeyboardControl(c) => self.process_action_keyboard_control(c, event).await,
             Action::Special(special_key) => self.process_action_special(special_key, event).await,
-            Action::User(_id) => {}
+            Action::User(id) => {
+                #[cfg(feature = "universal_symbols")]
+                self.process_universal_symbols_user_action(id, event).await;
+                #[cfg(not(feature = "universal_symbols"))]
+                let _ = id;
+            }
             Action::TriLayerLower => {
                 // Tri-layer lower, turn layer 1 on and update layer state
                 self.process_action_layer_switch(1, event);
@@ -1550,12 +1561,26 @@ impl<'a> Keyboard<'a> {
     // Process action key
     /// Universal HID keyboard-key pipeline: `Again` resolution, last-key/caps-word
     /// bookkeeping, dispatch (a `HidKeyCode` may alias to consumer/system/mouse), and one-shot post.
-    async fn process_action_key(&mut self, mut key: HidKeyCode, event: KeyboardEvent) {
+    async fn process_action_key(&mut self, key: HidKeyCode, event: KeyboardEvent) {
+        self.process_action_key_with_caps_word_key(key, key, event).await;
+    }
+
+    /// Process a physical HID key while using another key's Caps Word semantics.
+    /// Russian letters live on punctuation HID positions but must continue and shift Caps Word.
+    async fn process_action_key_with_caps_word_key(
+        &mut self,
+        mut key: HidKeyCode,
+        mut caps_word_key: HidKeyCode,
+        event: KeyboardEvent,
+    ) {
         // Process `Again` key first.
         // Not all platform support `Again` key, so we manually repeat it for users.
         if key == HidKeyCode::Again {
             debug!("Repeat(Again) last key code: {:?} , {:?}", self.last_key_code, event);
             key = self.last_key_code;
+            if caps_word_key == HidKeyCode::Again {
+                caps_word_key = key;
+            }
         }
 
         // Pre-check
@@ -1575,7 +1600,7 @@ impl<'a> Keyboard<'a> {
             }
 
             // Check Caps Word
-            self.caps_word.check(key);
+            self.caps_word.check(caps_word_key);
         }
 
         // Dispatch to the right HID report; only the plain-keyboard branch is "basic".
@@ -1751,6 +1776,99 @@ impl<'a> Keyboard<'a> {
         .await;
 
         // Yield once after sending the report to channel
+        yield_now().await;
+    }
+
+    #[cfg(feature = "universal_symbols")]
+    async fn process_universal_symbols_user_action(&mut self, user_id: u8, event: KeyboardEvent) {
+        if !event.pressed {
+            return;
+        }
+
+        let host_layout = crate::host_data::snapshot().layout;
+        let Some(command) = self.universal_symbols.handle(user_id, host_layout) else {
+            return;
+        };
+        let platform = self.universal_symbols.platform();
+
+        match command {
+            crate::universal_symbols::Command::None => {}
+            crate::universal_symbols::Command::SwitchLayout => {
+                self.send_universal_symbols_layout_switch(platform).await;
+            }
+            crate::universal_symbols::Command::Type(resolved) => {
+                if resolved.temporary_english {
+                    self.send_universal_symbols_layout_switch(platform).await;
+                }
+                self.send_universal_symbols_tap(resolved.stroke.keycode, resolved.stroke.modifiers)
+                    .await;
+                if resolved.temporary_english {
+                    self.send_universal_symbols_layout_switch(platform).await;
+                }
+            }
+            crate::universal_symbols::Command::TypeRussianLetter(keycode) => {
+                let mut letter_event = event;
+                self.process_action_key_with_caps_word_key(keycode, HidKeyCode::A, letter_event)
+                    .await;
+                Timer::after_millis(10).await;
+                letter_event.pressed = false;
+                self.process_action_key_with_caps_word_key(keycode, HidKeyCode::A, letter_event)
+                    .await;
+            }
+        }
+    }
+
+    #[cfg(feature = "universal_symbols")]
+    async fn send_universal_symbols_layout_switch(&mut self, platform: crate::universal_symbols::Platform) {
+        let Some((pressed_keys, released_keys)) = self.universal_symbols_key_reports(HidKeyCode::Space) else {
+            warn!("Universal Symbols: no free 6KRO slot for layout switch");
+            return;
+        };
+        let modifier = match platform {
+            crate::universal_symbols::Platform::Pc => ModifierCombination::LGUI,
+            crate::universal_symbols::Platform::Mac => ModifierCombination::LCTRL,
+        };
+
+        self.send_universal_symbols_report(modifier, pressed_keys).await;
+        Timer::after_millis(10).await;
+        self.send_universal_symbols_report(modifier, released_keys).await;
+        self.send_universal_symbols_report(ModifierCombination::new(), released_keys)
+            .await;
+        Timer::after_millis(50).await;
+        self.send_keyboard_report_with_resolved_modifiers(false).await;
+    }
+
+    #[cfg(feature = "universal_symbols")]
+    async fn send_universal_symbols_tap(&mut self, keycode: HidKeyCode, modifiers: ModifierCombination) {
+        let Some((pressed_keys, released_keys)) = self.universal_symbols_key_reports(keycode) else {
+            warn!("Universal Symbols: no free 6KRO slot for {:?}", keycode);
+            return;
+        };
+
+        self.send_universal_symbols_report(modifiers, pressed_keys).await;
+        Timer::after_millis(10).await;
+        self.send_universal_symbols_report(ModifierCombination::new(), released_keys)
+            .await;
+        self.send_keyboard_report_with_resolved_modifiers(false).await;
+    }
+
+    #[cfg(feature = "universal_symbols")]
+    fn universal_symbols_key_reports(&self, keycode: HidKeyCode) -> Option<([HidKeyCode; 6], [HidKeyCode; 6])> {
+        let mut pressed = self.held_keycodes;
+        let index = pressed.iter().position(|key| *key == HidKeyCode::No)?;
+        pressed[index] = keycode;
+        Some((pressed, self.held_keycodes))
+    }
+
+    #[cfg(feature = "universal_symbols")]
+    async fn send_universal_symbols_report(&self, modifiers: ModifierCombination, keycodes: [HidKeyCode; 6]) {
+        self.send_report(Report::KeyboardReport(KeyboardReport {
+            modifier: modifiers.into_bits(),
+            reserved: 0,
+            leds: LOCK_LED_STATES.load(core::sync::atomic::Ordering::Relaxed),
+            keycodes: keycodes.map(|key| key as u8),
+        }))
+        .await;
         yield_now().await;
     }
 

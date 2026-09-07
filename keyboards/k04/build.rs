@@ -1,13 +1,19 @@
-use const_gen::*;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::{env, fs};
+
+use const_gen::*;
 use xz2::read::XzEncoder;
 
 fn main() {
-    const FIRMWARE_VERSION: &str = "0.1.6";
-    const FIRMWARE_VERSION_BCD: &str = "0x0106";
+    // VIA and USB encode only numeric major/minor/patch components. The full
+    // release identity remains embedded in the selected Vial JSON.
+    const STANDALONE_RELEASE_VERSION: &str = "0.1.9";
+    const STANDALONE_FIRMWARE_VERSION: &str = "0.1.9";
+    const STANDALONE_FIRMWARE_VERSION_BCD: &str = "0x0109";
+    const QUBE_FIRMWARE_VERSION: &str = "0.1.8";
+    const QUBE_FIRMWARE_VERSION_BCD: &str = "0x0108";
 
     let vial_path = configured_path("VIAL_JSON_PATH", "vial.json");
     let keyboard_path = configured_path("KEYBOARD_TOML_PATH", "keyboard.toml");
@@ -18,15 +24,32 @@ fn main() {
     println!("cargo:rerun-if-changed={}", keyboard_path.display());
     println!("cargo:rerun-if-changed=memory_halves.x");
     println!("cargo:rerun-if-changed=memory_qube.x");
-    println!("cargo:rustc-env=RMK_FIRMWARE_VERSION={FIRMWARE_VERSION}");
-    println!("cargo:rustc-env=RMK_FIRMWARE_VERSION_BCD={FIRMWARE_VERSION_BCD}");
-
     let product_id = generate_vial_config(&vial_path);
     validate_keyboard_product_id(&keyboard_path, product_id);
     validate_topology_feature(product_id);
+    validate_vial_firmware_version(
+        &vial_path,
+        if is_standalone(product_id) {
+            STANDALONE_RELEASE_VERSION
+        } else {
+            QUBE_FIRMWARE_VERSION
+        },
+    );
+
+    let (firmware_version, firmware_version_bcd) = if is_standalone(product_id) {
+        (STANDALONE_FIRMWARE_VERSION, STANDALONE_FIRMWARE_VERSION_BCD)
+    } else {
+        (QUBE_FIRMWARE_VERSION, QUBE_FIRMWARE_VERSION_BCD)
+    };
+
+    println!("cargo:rustc-env=RMK_FIRMWARE_VERSION={firmware_version}");
+    println!("cargo:rustc-env=RMK_FIRMWARE_VERSION_BCD={firmware_version_bcd}");
 
     if is_standalone(product_id) || env::var_os("CARGO_FEATURE_QUBE").is_some() {
         println!("cargo:rustc-env=RMK_VIAL_DEVICE_SETTINGS_FN=crate::layer_names::vial_device_settings");
+    }
+    if is_standalone(product_id) {
+        println!("cargo:rustc-env=RMK_BLE_HOST_POWER_CONFIG_FN=crate::ble_host_power::ble_host_power_config");
     }
 
     let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
@@ -111,6 +134,23 @@ fn validate_keyboard_product_id(keyboard_path: &Path, expected: u16) {
         expected,
         "{} and selected Vial definition have different product IDs",
         keyboard_path.display()
+    );
+}
+
+fn validate_vial_firmware_version(vial_path: &Path, expected: &str) {
+    let content = fs::read_to_string(vial_path).unwrap_or_else(|e| panic!("Cannot read {}: {e}", vial_path.display()));
+    let parsed = json::parse(&content).unwrap_or_else(|e| panic!("Cannot parse {}: {e}", vial_path.display()));
+    assert_eq!(
+        parsed["firmware"]["version"].as_str(),
+        Some(expected),
+        "{} firmware.version must match the selected release",
+        vial_path.display()
+    );
+    assert_eq!(
+        parsed["firmwareVersion"].as_str(),
+        Some(expected),
+        "{} firmwareVersion must match the selected release",
+        vial_path.display()
     );
 }
 

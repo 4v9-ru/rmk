@@ -9,7 +9,8 @@ pub const LAYER_NAME_COUNT: usize = 16;
 pub const LAYER_NAME_MAX: usize = 12;
 const LAYER_NAME_QSID_BASE: u16 = 200;
 const STORAGE_MARKER: u8 = 0xE4;
-const STORAGE_VERSION: u8 = 3;
+const STORAGE_VERSION: u8 = 4;
+const REMOVED_HOST_TIMEOUT_STORAGE_VERSION: u8 = 3;
 const PREVIOUS_STORAGE_VERSION: u8 = 2;
 const LEGACY_STORAGE_VERSION: u8 = 1;
 const STORAGE_HEADER_LEN: usize = 2;
@@ -55,9 +56,9 @@ const IDX_LED_BRIGHTNESS: usize = 20;
 const IDX_LED_TIMEOUT_SEC: usize = 21;
 const IDX_LAYER_COLORS_PACKED: usize = 22;
 const IDX_BT_PROFILE_COLORS: usize = 32;
-// Preserve the former deep-sleep byte so the v9 storage layout does not shift.
-// It is intentionally neither advertised nor consumed by firmware behavior.
-const IDX_RESERVED_DEEP_SLEEP_TIMEOUT: usize = 37;
+// Preserve byte 37 so the v9 storage layout does not shift. Firmware no
+// longer advertises or consumes this former host-timeout setting.
+const IDX_RESERVED_HOST_DISCONNECT_TIMEOUT: usize = 37;
 const IDX_AUTO_LAYER_TIMEOUT: usize = 38;
 const IDX_MODULE_SELECT: usize = 39;
 const IDX_LEFT_ENCODER_INTERVAL: usize = 40;
@@ -91,8 +92,8 @@ const MODULE_SELECT_TOUCH: u8 = 3;
 const MODULE_DEFAULTS: [u8; MODULE_SETTINGS_LEN] = {
     let mut data = [0u8; MODULE_SETTINGS_LEN];
     data[IDX_VERSION] = MODULE_SETTINGS_VERSION;
-    data[IDX_LEFT_BALL_DPI] = 4;
-    data[IDX_RIGHT_BALL_DPI] = 4;
+    data[IDX_LEFT_BALL_DPI] = if cfg!(feature = "production_v22") { 2 } else { 4 };
+    data[IDX_RIGHT_BALL_DPI] = if cfg!(feature = "production_v22") { 2 } else { 4 };
     data[IDX_LEFT_TOUCH_DPI] = 3;
     data[IDX_RIGHT_TOUCH_DPI] = 3;
     data[IDX_FLAGS] = DEFAULT_ACCELERATION_FLAGS;
@@ -107,7 +108,8 @@ const MODULE_DEFAULTS: [u8; MODULE_SETTINGS_LEN] = {
     data[IDX_AUTO_FLAGS] = DEFAULT_AUTO_FLAGS;
     data[IDX_LED_BRIGHTNESS] = 8;
     data[IDX_LED_TIMEOUT_SEC] = 1;
-    data[IDX_RESERVED_DEEP_SLEEP_TIMEOUT] = 0;
+    // Keep the former 30-minute index for downgrade compatibility.
+    data[IDX_RESERVED_HOST_DISCONNECT_TIMEOUT] = 3;
     data[IDX_AUTO_LAYER_TIMEOUT] = 1;
     data[IDX_LEFT_ENCODER_INTERVAL] = 4;
     data[IDX_RIGHT_ENCODER_INTERVAL] = 4;
@@ -247,18 +249,24 @@ fn deserialize(bytes: &[u8]) {
     if bytes.first() == Some(&STORAGE_MARKER) {
         let profile = match bytes.get(1).copied() {
             Some(STORAGE_VERSION) if bytes.len() >= LAYER_NAMES_STORAGE_OFFSET => {
-                Some((LAYER_NAMES_STORAGE_OFFSET, false))
+                Some((LAYER_NAMES_STORAGE_OFFSET, false, false))
+            }
+            Some(REMOVED_HOST_TIMEOUT_STORAGE_VERSION) if bytes.len() >= LAYER_NAMES_STORAGE_OFFSET => {
+                Some((LAYER_NAMES_STORAGE_OFFSET, false, true))
             }
             Some(PREVIOUS_STORAGE_VERSION) if bytes.len() >= LAYER_NAMES_STORAGE_OFFSET => {
-                Some((LAYER_NAMES_STORAGE_OFFSET, true))
+                Some((LAYER_NAMES_STORAGE_OFFSET, true, false))
             }
             Some(LEGACY_STORAGE_VERSION) if bytes.len() >= LEGACY_LAYER_NAMES_STORAGE_OFFSET => {
-                Some((LEGACY_LAYER_NAMES_STORAGE_OFFSET, true))
+                Some((LEGACY_LAYER_NAMES_STORAGE_OFFSET, true, false))
             }
             _ => None,
         };
-        if let Some((layer_names_offset, migrate_placeholders)) = profile {
+        if let Some((layer_names_offset, migrate_placeholders, reset_reserved_timeout)) = profile {
             deserialize_module_settings(&bytes[MODULE_STORAGE_OFFSET..layer_names_offset]);
+            if reset_reserved_timeout {
+                module_set_byte(IDX_RESERVED_HOST_DISCONNECT_TIMEOUT, 3);
+            }
             deserialize_compact_layer_names(&bytes[layer_names_offset..]);
             if migrate_placeholders {
                 migrate_legacy_placeholders();
@@ -602,7 +610,7 @@ fn serialize_module_settings() -> [u8; MODULE_SETTINGS_STORAGE_LEN] {
         pack_color(&mut data, 15, i, module_bt_profile_color_index(i - 16));
         i += 1;
     }
-    data[29] = (module_byte(IDX_RESERVED_DEEP_SLEEP_TIMEOUT) & 0x0f)
+    data[29] = (module_byte(IDX_RESERVED_HOST_DISCONNECT_TIMEOUT) & 0x0f)
         | ((module_byte(IDX_LEFT_ENCODER_INTERVAL).min(9) & 0x0f) << 4);
     data[30] =
         module_byte(IDX_AUTO_LAYER_TIMEOUT).min(5) | ((module_byte(IDX_RIGHT_ENCODER_INTERVAL).min(9) & 0x0f) << 4);
@@ -654,7 +662,7 @@ fn deserialize_module_settings(data: &[u8]) {
         module_set_bt_profile_color_index(i - 16, unpack_color(data, 15, i).min(24));
         i += 1;
     }
-    MODULE_SETTINGS[IDX_RESERVED_DEEP_SLEEP_TIMEOUT].store(data[29] & 0x0f, Ordering::Relaxed);
+    MODULE_SETTINGS[IDX_RESERVED_HOST_DISCONNECT_TIMEOUT].store(data[29] & 0x0f, Ordering::Relaxed);
     MODULE_SETTINGS[IDX_LEFT_ENCODER_INTERVAL].store((data[29] >> 4).min(9), Ordering::Relaxed);
     MODULE_SETTINGS[IDX_AUTO_LAYER_TIMEOUT].store((data[30] & 0x0f).min(5), Ordering::Relaxed);
     MODULE_SETTINGS[IDX_RIGHT_ENCODER_INTERVAL].store((data[30] >> 4).min(9), Ordering::Relaxed);

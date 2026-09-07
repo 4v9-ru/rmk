@@ -1,5 +1,128 @@
 # Changelog
 
+## Unreleased
+
+## v0.1.9
+
+Stable release for the standalone K:04 Series: K:04, K:04 Mini, and K:04 Micro. K:04 Qube profiles and all other keyboards remain on v0.1.8.
+
+### Fixes
+
+- Deferred host-BLE idle and disconnect power transitions while USB is the active output, fixing both K:04 halves freezing after the two-minute idle boundary on wired connections
+
+### Verification
+
+- Reproduced the v0.1.8 wired freeze on physical K:04 hardware, eliminated it with the host-power A/B build, and confirmed the final active-USB guard with a second hardware test
+
+## v0.1.9-rc.2
+
+Corrective release candidate for the standalone K:04 Series after review of `v0.1.9-rc.1`.
+
+- CI now builds K:04, K:04 Mini, and K:04 Micro with the validated `production_v22` feature set
+- Restored live left/right Ball DPI settings while retaining 600 CPI as the production default
+- Applied USB `bcdDevice = 0x0109` to the actual device descriptor
+- Enabled right-half split liveness recovery in non-diagnostic production builds
+- Removed a non-portable atomic read-modify-write from the generic BLE path
+- Queued each native i16 mouse delta once and moved HID chunking into the transport writers, preventing one extreme event from filling the report queue
+- Restored the pre-v22 4/8 ms cadence and i8 event width for K:04 Qube halves
+- Added regression coverage for the production workflow, USB BCD, split recovery, Qube isolation, live DPI, and extreme motion deltas
+
+## v0.1.9-rc.1
+
+Release candidate for the standalone K:04 Series: K:04, K:04 Mini, and K:04 Micro. K:04 Qube profiles and all other keyboards remain on v0.1.8.
+
+The embedded Vial definition carries the full `0.1.9-rc.1` identity. VIA and USB fields that support only numeric versions advertise `0.1.9` / `0x0109`.
+
+### Features
+
+- Added the `production_v22` build profile for all six standalone K:04 Series half images, with diagnostic features excluded at compile time and release symbols stripped
+- Added accumulated full-width `i16` motion transport from the right half so lowering the split report rate never discards trackball distance
+- Added generation-aware split lifecycle state and recovery so the left half can reset, tear down stale resources, and reconnect to the still-running right half
+- Added gated RTT instrumentation and regression helpers for split timing, HID queues, PMW3610 health, radio strength, USB state, and movement preservation; none are enabled in production images
+
+### Improvements
+
+- Set right-half motion reports to 15 ms, exactly two 7.5 ms split radio windows, while retaining 4 ms local trackball sampling
+- Paced BLE HID mouse reports at 7.5 ms and merged queued relative motion with proportional vector-preserving chunking, retaining button ordering and total movement
+- Configured the K:04 Series radio for +8 dBm and 1M PHY, and enabled the E73 REG1 DC/DC path with REG0 disabled
+- Configured PMW3610 for 600 CPI, Smart Mode, software axis swapping, and verified register setup on K:04, Mini, and Micro
+- Refreshed bonded-host connection parameters through an Apple-compatible 15 ms request followed by 7.5 ms when accepted, with a 15 ms/latency-zero fallback
+- Preserved the v0.1.8 two-minute sleep timeout and host power policy
+
+### Fixes
+
+- Removed the persistent right-trackball latency caused by sending split movement faster than the BLE link could drain its notification queue
+- Reduced weak-signal right-trackball microfreezes without clipping or losing accumulated motion
+- Recovered PMW3610 from failed or implausible reads and added fallback reads after motion gaps
+- Fixed split recovery after resetting the left half, including stale channel/resource cleanup and advertising/HCI race handling
+- Cleared stale USB, POWER, and NVIC state left by the UF2 bootloader on the right half so disconnecting USB cannot leave it locked up
+- Corrected VBUS/charging indication and made live split-searching state take priority over stale connected LED state
+
+### Verification
+
+- Passed all four motion pacing and movement-preservation tests, the RMK feature test matrix, and production builds for both halves of K:04, K:04 Mini, and K:04 Micro
+- Validated all six UF2 images as nRF52840 firmware starting at `0x00026000`
+- Physically validated K:04 right-trackball behavior at 20 cm and 60 cm; K:04 Mini and K:04 Micro still require model-specific hardware regression testing
+
+## v0.1.8
+
+### Features
+
+- Added two-stage host BLE power saving to all seven supported Ergohaven standalone profiles—K:03, K:04, K:04 Mini, K:04 Micro, Imperial44, OP36, and Velvet—with low-duty host link parameters after two minutes, a fixed host disconnect after 30 minutes, and fast bonded wake that retains the first supported input event
+- Advertised firmware-native Repeat/Again and Fork key-override capabilities to Entropy for all 14 supported Ergohaven standalone and Qube profiles
+
+### Improvements
+
+- Aligned the K:04 left-bracket key geometry with the surrounding row in Vial
+- Expanded Vial Key Override capacity from 8 to 32 slots across every supported Ergohaven profile
+- Updated the embedded firmware and package identity to v0.1.8 for all 14 supported Ergohaven standalone and Qube profiles
+
+### Fixes
+
+- Hardened bonded BLE wake through encryption, fast reconnect, local HID suspend, safe split-radio scheduling, stale-peer recovery, and fail-closed recovery from stalled HID notifications
+- Released temporary wake-input observers immediately after reconnect so their queues cannot block a key release and leave the last key repeating
+- Preserved queued input across sleeping reconnects and restored bonded reconnect and macro layer actions
+- Prevented K:04 from reporting a false full-battery state while charging
+
+## v0.1.8-rc.5
+
+### Improvements
+
+- Advertised firmware-native Repeat/Again support so Entropy can expose it independently from QMK Alt Repeat slots
+
+### Verification
+
+- Kept every production Ergohaven profile at 32 Morse / Tap Dance entries
+
+## v0.1.8-rc.4
+
+### Features
+
+- Added two-stage host BLE power saving for standalone K:04, K:04 Mini, and K:04 Micro: low-duty connection parameters after two minutes, then a configurable full disconnect after 10 minutes to 5 hours
+- Preserved the first keyboard, encoder, trackball, or touchpad event while reconnecting after idle sleep
+
+### Fixes
+
+- Applied host disconnect timeout changes immediately and migrated existing v0.1.7 settings to the new 30-minute default
+- Kept wake-key press and release reports ordered while a sleeping bonded host reconnects, without blocking later keyboard input
+
+## v0.1.7
+
+### Features
+
+- Added firmware-native Universal Symbols and Russian letters to dynamic Combo and Tap Dance actions
+- Added persistent per-combo activation layers configurable from Entropy
+- Advertised exact firmware update package identities for all 14 supported Ergohaven keyboard and Qube profiles
+
+### Fixes
+
+- Suspended K:04 trackball and touchpad modules during automatic sleep while preserving their selected type and settings after wake
+- Stabilized repeated macro saves, split BLE traffic, pointing-mode changes, and K:04 thumb-cluster geometry
+
+### Removed
+
+- Removed RMK firmware and release builds for the standalone Trackball Mini v3.0, Mini v3.1, and Royale devices
+
 ## v0.1.5-rc.1
 
 ### Features

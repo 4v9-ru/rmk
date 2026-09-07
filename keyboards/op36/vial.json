@@ -4,12 +4,14 @@
     "vendorId": "0xE126",
     "productId": "0x0036",
     "entropy": {
+        "firmwareUpdate": { "asset": "op36" },
         "batteryHalves": true
     },
     "firmware": {
-        "version": "0.1.6"
+        "name": "RMK",
+        "version": "0.1.8"
     },
-    "firmwareVersion": "0.1.6",
+    "firmwareVersion": "0.1.8",
     "lighting": "none",
     "matrix": {
         "rows": 6,

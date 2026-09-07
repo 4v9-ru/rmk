@@ -2,8 +2,9 @@ use core::cell::{Cell, RefCell};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use bt_hci::cmd::le::{LeReadLocalSupportedFeatures, LeSetPhy, LeSetScanParams};
+use bt_hci::cmd::status::ReadRssi;
 use bt_hci::controller::{ControllerCmdAsync, ControllerCmdSync};
-use embassy_futures::select::{Either, Either3, select, select3};
+use embassy_futures::select::{Either, Either3, Either4, select, select3, select4};
 use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
@@ -12,12 +13,12 @@ use heapless::VecView;
 use trouble_host::prelude::*;
 
 use crate::SPLIT_PAIRING_TIMEOUT_SECONDS;
-use crate::ble::sleep::{report_activity, report_pointing_activity};
+use crate::ble::sleep::{is_sleeping, report_activity, report_pointing_activity};
 use crate::ble::{update_ble_phy, update_conn_params};
 use crate::channel::FLASH_CHANNEL;
 use crate::event::{
     EventSubscriber, PeripheralConnectedEvent, PointingEvent, SleepStateEvent, SplitConnectionState,
-    SplitConnectionStateEvent, SubscribableEvent, publish_event,
+    SplitConnectionStateEvent, SubscribableEvent, publish_event, set_current_split_connection_state,
 };
 #[cfg(feature = "storage")]
 use crate::split::ble::PeerAddress;
@@ -38,8 +39,16 @@ static PERIPHERAL_CONNECTION_CHANGED: Signal<crate::RawMutex, ()> = Signal::new(
 static SPLIT_WINDOW_RESTART: Signal<crate::RawMutex, u32> = Signal::new();
 static SPLIT_WINDOW_DONE: Signal<crate::RawMutex, u32> = Signal::new();
 static SPLIT_WINDOW_GENERATION: BlockingMutex<crate::RawMutex, Cell<u32>> = BlockingMutex::new(Cell::new(0));
-static CONFIGURED_LINK_PROFILES: AtomicU32 = AtomicU32::new(0);
-static POINTING_LINK_PROFILES: AtomicU32 = AtomicU32::new(0);
+#[derive(Clone, Copy)]
+struct LinkProfileOverrides {
+    configured: u32,
+    pointing: u32,
+}
+static LINK_PROFILE_OVERRIDES: BlockingMutex<crate::RawMutex, Cell<LinkProfileOverrides>> =
+    BlockingMutex::new(Cell::new(LinkProfileOverrides {
+        configured: 0,
+        pointing: 0,
+    }));
 static LINK_PROFILE_CHANGED: [Signal<crate::RawMutex, ()>; u32::BITS as usize] =
     [const { Signal::new() }; u32::BITS as usize];
 
@@ -51,6 +60,62 @@ const POINTING_ACTIVITY_THRESHOLD: u16 = 2;
 
 const SPLIT_SERVICE_UUID: [u8; 16] = [70, 153, 101, 152, 54, 53, 10, 191, 7, 75, 229, 24, 170, 251, 213, 77];
 const SPLIT_COMPANY_ID: u16 = 0xe118;
+const VALIDATED_PEER_FAILURE_LIMIT: u8 = 3;
+#[cfg(feature = "rtt_diag")]
+const SPLIT_RSSI_INTERVAL: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FailedPeerAction {
+    Retain { consecutive_failures: u8 },
+    Forget,
+}
+
+#[derive(Default)]
+struct PeerRetryState {
+    validated_failures: u8,
+}
+
+impl PeerRetryState {
+    fn on_failed_attempt(&mut self, uncommitted: bool) -> FailedPeerAction {
+        if uncommitted {
+            self.validated_failures = 0;
+            return FailedPeerAction::Forget;
+        }
+
+        self.validated_failures = self.validated_failures.saturating_add(1);
+        if self.validated_failures >= VALIDATED_PEER_FAILURE_LIMIT {
+            self.validated_failures = 0;
+            FailedPeerAction::Forget
+        } else {
+            FailedPeerAction::Retain {
+                consecutive_failures: self.validated_failures,
+            }
+        }
+    }
+
+    fn on_validated(&mut self) {
+        self.validated_failures = 0;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SplitScanTiming {
+    interval: Duration,
+    window: Duration,
+}
+
+fn split_scan_timing() -> SplitScanTiming {
+    // A continuous split scan can starve an already-connected host link on a
+    // single radio. Leave 70% of each cycle to established link traffic.
+    SplitScanTiming {
+        interval: Duration::from_millis(100),
+        window: Duration::from_millis(30),
+    }
+}
+
+fn split_liveness_poll() -> Duration {
+    Duration::from_millis(250)
+}
 
 /// Active connection cadence for a generated split keyboard.
 ///
@@ -73,11 +138,18 @@ pub fn set_split_link_profile(peripheral_id: usize, profile: SplitLinkProfile) -
         return false;
     };
     let bit = bit_for_peri(peripheral_id);
-    let was_configured = CONFIGURED_LINK_PROFILES.fetch_or(bit, Ordering::AcqRel) & bit != 0;
-    let previous_pointing = match profile {
-        SplitLinkProfile::Keyboard => POINTING_LINK_PROFILES.fetch_and(!bit, Ordering::AcqRel) & bit != 0,
-        SplitLinkProfile::Pointing => POINTING_LINK_PROFILES.fetch_or(bit, Ordering::AcqRel) & bit != 0,
-    };
+    let (was_configured, previous_pointing) = LINK_PROFILE_OVERRIDES.lock(|state| {
+        let current = state.get();
+        let pointing = match profile {
+            SplitLinkProfile::Keyboard => current.pointing & !bit,
+            SplitLinkProfile::Pointing => current.pointing | bit,
+        };
+        state.set(LinkProfileOverrides {
+            configured: current.configured | bit,
+            pointing,
+        });
+        (current.configured & bit != 0, current.pointing & bit != 0)
+    });
     let is_pointing = profile == SplitLinkProfile::Pointing;
     if !was_configured || previous_pointing != is_pointing {
         changed.signal(());
@@ -87,14 +159,16 @@ pub fn set_split_link_profile(peripheral_id: usize, profile: SplitLinkProfile) -
 
 fn effective_split_link_profile(peripheral_id: usize, generated: SplitLinkProfile) -> SplitLinkProfile {
     let bit = bit_for_peri(peripheral_id);
-    if CONFIGURED_LINK_PROFILES.load(Ordering::Acquire) & bit == 0 {
-        return generated;
-    }
-    if POINTING_LINK_PROFILES.load(Ordering::Acquire) & bit != 0 {
-        SplitLinkProfile::Pointing
-    } else {
-        SplitLinkProfile::Keyboard
-    }
+    LINK_PROFILE_OVERRIDES.lock(|state| {
+        let state = state.get();
+        if state.configured & bit == 0 {
+            generated
+        } else if state.pointing & bit != 0 {
+            SplitLinkProfile::Pointing
+        } else {
+            SplitLinkProfile::Keyboard
+        }
+    })
 }
 
 fn required_peripheral_mask() -> u32 {
@@ -124,6 +198,11 @@ fn publish_peripheral_connection(id: usize, connected: bool) {
 }
 
 fn publish_split_connection_state(state: SplitConnectionState, generation: u32, terminal: bool) {
+    set_current_split_connection_state(state);
+    info!(
+        "[SPLIT_STATE_L_V15] state={:?} generation={} terminal={}",
+        state, generation, terminal
+    );
     publish_event(SplitConnectionStateEvent(state));
     if terminal {
         SPLIT_WINDOW_DONE.signal(generation);
@@ -299,8 +378,11 @@ pub async fn scan_peripherals<
                     let mut central = stack.central();
                     wait_for_stack_started().await;
                     let mut scanner = Scanner::new(&mut central);
+                    let timing = split_scan_timing();
                     let scan_config = ScanConfig {
                         active: false,
+                        interval: timing.interval,
+                        window: timing.window,
                         ..Default::default()
                     };
                     let _guard = SCANNING_MUTEX.lock().await;
@@ -437,16 +519,31 @@ fn take_uncommitted_peer_candidate(peri_id: usize) -> bool {
     })
 }
 
-async fn forget_failed_peer(peri_id: usize, addrs: &RefCell<VecView<Option<[u8; 6]>>>) {
-    take_uncommitted_peer_candidate(peri_id);
+async fn handle_failed_peer(
+    peri_id: usize,
+    addrs: &RefCell<VecView<Option<[u8; 6]>>>,
+    retry_state: &mut PeerRetryState,
+) {
+    let uncommitted = take_uncommitted_peer_candidate(peri_id);
+    match retry_state.on_failed_attempt(uncommitted) {
+        FailedPeerAction::Retain { consecutive_failures } => {
+            warn!(
+                "Retaining validated split peer {} after transient connection failure {}/{}",
+                peri_id, consecutive_failures, VALIDATED_PEER_FAILURE_LIMIT
+            );
+            return;
+        }
+        FailedPeerAction::Forget => {}
+    }
+
     if let Some(addr) = addrs.borrow_mut().get_mut(peri_id) {
         *addr = None;
     }
 
-    // A stored address can belong to an older Qube/half pairing. Keeping it
-    // after an initiating failure prevents the central from ever scanning for
-    // the currently powered peripheral. Invalidate only after the connection
-    // attempt itself fails; normal disconnects retain the proven address.
+    // An address learned by the current scan is not trusted until product
+    // validation succeeds, so forget it immediately. A previously validated
+    // peer gets a bounded retry window before it is cleared, allowing both
+    // transient recovery and eventual replacement/re-pairing.
     #[cfg(feature = "storage")]
     FLASH_CHANNEL
         .send(FlashOperationMessage::PeerAddress(PeerAddress::new(
@@ -478,7 +575,8 @@ pub(crate) async fn run_ble_peripheral_manager<
     C: Controller
         + ControllerCmdSync<LeSetScanParams>
         + ControllerCmdAsync<LeSetPhy>
-        + ControllerCmdSync<LeReadLocalSupportedFeatures>,
+        + ControllerCmdSync<LeReadLocalSupportedFeatures>
+        + ControllerCmdSync<ReadRssi>,
     const ROW: usize,
     const COL: usize,
     const ROW_OFFSET: usize,
@@ -490,6 +588,7 @@ pub(crate) async fn run_ble_peripheral_manager<
     profile: SplitLinkProfile,
 ) {
     trace!("SPLIT_MESSAGE_MAX_SIZE: {}", SPLIT_MESSAGE_MAX_SIZE);
+    let mut peer_retry_state = PeerRetryState::default();
 
     loop {
         // Check until the address is available
@@ -507,14 +606,14 @@ pub(crate) async fn run_ble_peripheral_manager<
 
         let mut central = stack.central();
         let active_profile = effective_split_link_profile(peri_id, profile);
+        let timing = split_scan_timing();
         let config = ConnectConfig {
             connect_params: active_central_conn_param(active_profile),
             scan_config: ScanConfig {
                 filter_accept_list: &[address],
-                // Match the effective 62.5 ms initiating scan used by the
-                // last working bt-hci 0.6 firmware.
-                interval: Duration::from_micros(62_500),
-                window: Duration::from_micros(62_500),
+                active: false,
+                interval: timing.interval,
+                window: timing.window,
                 ..Default::default()
             },
         };
@@ -556,24 +655,23 @@ pub(crate) async fn run_ble_peripheral_manager<
                     let e = defmt::Debug2Format(&e);
                     error!("BLE central error: {:?}", e);
                 }
-                if !peer_validated.get() {
+                publish_peripheral_connection(peri_id, false);
+                if peer_validated.get() {
+                    peer_retry_state.on_validated();
+                } else {
                     warn!("Split peripheral {} disconnected before validation", peri_id);
-                    // A successful HCI connection can still fail during GATT
-                    // discovery or product validation. Treat that exactly like
-                    // an initiating failure so a stale saved address cannot
-                    // trap Qube in an endless reconnect loop.
-                    forget_failed_peer(peri_id, addrs).await;
+                    handle_failed_peer(peri_id, addrs, &mut peer_retry_state).await;
                 }
             }
             Ok(Err(e)) => {
                 #[cfg(feature = "defmt")]
                 let e = defmt::Debug2Format(&e);
                 error!("Connect to peripheral {} error: {:?}", peri_id, e);
-                forget_failed_peer(peri_id, addrs).await;
+                handle_failed_peer(peri_id, addrs, &mut peer_retry_state).await;
             }
             Err(_) => {
                 warn!("Connect to peripheral {} timeout", peri_id);
-                forget_failed_peer(peri_id, addrs).await;
+                handle_failed_peer(peri_id, addrs, &mut peer_retry_state).await;
             }
         }
         // Reconnect after 500ms
@@ -650,7 +748,10 @@ async fn validate_split_product<T: SplitReader + SplitWriter>(driver: &mut T) ->
 async fn run_central_manager_task<
     'b,
     's: 'b,
-    C: Controller + ControllerCmdAsync<LeSetPhy> + ControllerCmdSync<LeReadLocalSupportedFeatures>,
+    C: Controller
+        + ControllerCmdAsync<LeSetPhy>
+        + ControllerCmdSync<LeReadLocalSupportedFeatures>
+        + ControllerCmdSync<ReadRssi>,
     P: PacketPool,
     const ROW: usize,
     const COL: usize,
@@ -666,24 +767,62 @@ async fn run_central_manager_task<
 ) -> Result<(), BleHostError<C::Error>> {
     let client = GattClient::<C, P, 10>::new(stack, conn).await?;
 
-    // Use 2M Phy
+    // Use 2M Phy.
     update_ble_phy(stack, conn).await;
 
     info!("Updating connection parameters for peripheral");
     let active_profile = effective_split_link_profile(id, profile);
     update_conn_params(stack, conn, &active_central_conn_param(active_profile)).await;
 
-    match select3(
+    match select4(
         ble_central_task(&client, conn),
         run_peripheral_manager::<_, _, ROW, COL, ROW_OFFSET, COL_OFFSET>(id, peer_address, &client, peer_validated),
         follow_sleep_state(stack, conn, id, profile),
+        log_split_rssi(stack, conn, id),
     )
     .await
     {
-        Either3::First(e) => e,
-        Either3::Second(e) => e,
-        Either3::Third(e) => e,
+        Either4::First(e) => e,
+        Either4::Second(e) => e,
+        Either4::Third(e) => e,
+        Either4::Fourth(e) => e,
     }
+}
+
+#[cfg(feature = "rtt_diag")]
+async fn log_split_rssi<'b, 's: 'b, C, P>(
+    stack: &'b Stack<'s, C, P>,
+    conn: &Connection<'b, P>,
+    peripheral_id: usize,
+) -> Result<(), BleHostError<C::Error>>
+where
+    C: Controller + ControllerCmdSync<ReadRssi>,
+    P: PacketPool,
+{
+    loop {
+        Timer::after(SPLIT_RSSI_INTERVAL).await;
+        match conn.rssi(stack).await {
+            Ok(rssi) => info!("[SPLIT_RSSI] side=L id={} rssi_dbm={}", peripheral_id, rssi),
+            Err(e) => {
+                #[cfg(feature = "defmt")]
+                let e = defmt::Debug2Format(&e);
+                warn!("[SPLIT_RSSI] side=L id={} read_error={:?}", peripheral_id, e);
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "rtt_diag"))]
+async fn log_split_rssi<'b, 's: 'b, C, P>(
+    _stack: &'b Stack<'s, C, P>,
+    _conn: &Connection<'b, P>,
+    _peripheral_id: usize,
+) -> Result<(), BleHostError<C::Error>>
+where
+    C: Controller + ControllerCmdSync<ReadRssi>,
+    P: PacketPool,
+{
+    core::future::pending().await
 }
 
 async fn ble_central_task<'a, C: Controller + ControllerCmdAsync<LeSetPhy>, P: PacketPool>(
@@ -693,7 +832,7 @@ async fn ble_central_task<'a, C: Controller + ControllerCmdAsync<LeSetPhy>, P: P
     // Simply monitor connection status
     let conn_check = async {
         while conn.is_connected() {
-            Timer::after_secs(5).await;
+            Timer::after(split_liveness_poll()).await;
         }
     };
 
@@ -800,7 +939,11 @@ impl<'a, 'b, 'c, C: Controller + ControllerCmdAsync<LeSetPhy>, P: PacketPool> Sp
         trace!("Received split message: {:?}", message);
 
         match &message {
-            SplitMessage::Pointing(event) => update_pointing_activity_time(event),
+            SplitMessage::Pointing(event) => {
+                #[cfg(feature = "rtt_diag")]
+                crate::rtt_diag::record_split_rx(event);
+                update_pointing_activity_time(event);
+            }
             SplitMessage::Key(_) => report_activity(),
             _ => {}
         }
@@ -868,12 +1011,14 @@ async fn follow_sleep_state<
     let mut sleep_events = SleepStateEvent::subscriber();
     let profile_changed = LINK_PROFILE_CHANGED.get(peripheral_id);
 
-    // A new link needs the active cadence for discovery and traffic. Reporting
-    // activity also wakes every other split link through the global manager.
-    report_activity();
-
-    // `run_central_manager_task` just requested the active parameters.
-    let mut applied_sleeping = false;
+    // A new link must follow the already-latched keyboard state. Treating link
+    // creation as user input can wake the host and every other split link.
+    let mut applied_sleeping = if is_sleeping() {
+        info!("New split link inherits sleep mode");
+        update_conn_params(stack, conn, &sleeping_central_conn_param()).await
+    } else {
+        false
+    };
     let mut applied_profile = effective_split_link_profile(peripheral_id, generated_profile);
     loop {
         let update = if let Some(profile_changed) = profile_changed {
@@ -952,6 +1097,70 @@ pub fn pointing_quiet_period_remaining(quiet_period: Duration) -> Duration {
 #[cfg(test)]
 mod advertisement_tests {
     use super::*;
+
+    #[test]
+    fn uncommitted_peer_is_forgotten_after_first_failure() {
+        let mut retry = PeerRetryState::default();
+
+        assert_eq!(retry.on_failed_attempt(true), FailedPeerAction::Forget);
+    }
+
+    #[test]
+    fn validated_peer_is_retried_twice_then_forgotten() {
+        let mut retry = PeerRetryState::default();
+
+        assert_eq!(
+            retry.on_failed_attempt(false),
+            FailedPeerAction::Retain {
+                consecutive_failures: 1
+            }
+        );
+        assert_eq!(
+            retry.on_failed_attempt(false),
+            FailedPeerAction::Retain {
+                consecutive_failures: 2
+            }
+        );
+        assert_eq!(retry.on_failed_attempt(false), FailedPeerAction::Forget);
+    }
+
+    #[test]
+    fn successful_validation_resets_peer_failure_count() {
+        let mut retry = PeerRetryState::default();
+        assert!(matches!(
+            retry.on_failed_attempt(false),
+            FailedPeerAction::Retain {
+                consecutive_failures: 1
+            }
+        ));
+        assert!(matches!(
+            retry.on_failed_attempt(false),
+            FailedPeerAction::Retain {
+                consecutive_failures: 2
+            }
+        ));
+
+        retry.on_validated();
+
+        assert_eq!(
+            retry.on_failed_attempt(false),
+            FailedPeerAction::Retain {
+                consecutive_failures: 1
+            }
+        );
+    }
+
+    #[test]
+    fn split_scan_leaves_radio_time_for_established_links() {
+        assert_eq!(
+            split_scan_timing(),
+            SplitScanTiming {
+                interval: Duration::from_millis(100),
+                window: Duration::from_millis(30),
+            }
+        );
+        assert_eq!(split_liveness_poll(), Duration::from_millis(250));
+    }
 
     fn current_advertisement(product_id: u16, peripheral_id: u8) -> [u8; 28] {
         let mut data = [0u8; 28];

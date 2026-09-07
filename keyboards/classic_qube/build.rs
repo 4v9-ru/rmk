@@ -18,8 +18,8 @@ use std::{env, fs};
 use xz2::read::XzEncoder;
 
 fn main() {
-    const FIRMWARE_VERSION: &str = "0.1.6";
-    const FIRMWARE_VERSION_BCD: &str = "0x0106";
+    const FIRMWARE_VERSION: &str = "0.1.8";
+    const FIRMWARE_VERSION_BCD: &str = "0x0108";
 
     let vial_path = configured_path("VIAL_JSON_PATH", "vial.json");
     let keyboard_path = configured_path("KEYBOARD_TOML_PATH", "keyboard.toml");
@@ -111,6 +111,10 @@ fn generate_vial_config(vial_path: &Path) -> u16 {
     if !parsed.has_key("entropy") {
         parsed.insert("entropy", json::object! {}).unwrap();
     }
+    parsed["firmware"].insert("name", "RMK").unwrap();
+    let mut firmware_update = json::object! {};
+    firmware_update.insert("asset", qube_release_asset(product_id)).unwrap();
+    parsed["entropy"].insert("firmwareUpdate", firmware_update).unwrap();
     parsed["entropy"]["liveFeatures"] = json::array!["time", "media"];
     parsed["entropy"]["batteryHalves"] = true.into();
     let vial_cfg = json::stringify(parsed);
@@ -129,6 +133,16 @@ fn generate_vial_config(vial_path: &Path) -> u16 {
     fs::write(out_file, const_declarations).unwrap();
 
     product_id
+}
+
+fn qube_release_asset(product_id: u16) -> &'static str {
+    match product_id {
+        0x0036 => "op36-qube",
+        0x0044 => "imperial44-qube",
+        0x0070 => "k03-qube",
+        0x00BE => "velvet-qube",
+        _ => unreachable!(),
+    }
 }
 
 fn generate_qube_profile(product_id: u16, out: &Path) {

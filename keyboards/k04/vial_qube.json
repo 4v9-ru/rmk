@@ -4,13 +4,15 @@
     "vendorId": "0xE126",
     "productId": "0x0071",
     "entropy": {
+        "firmwareUpdate": { "asset": "k04-qube" },
         "liveFeatures": ["time", "media"],
         "batteryHalves": true
     },
     "firmware": {
-        "version": "0.1.6"
+        "name": "RMK",
+        "version": "0.1.8"
     },
-    "firmwareVersion": "0.1.6",
+    "firmwareVersion": "0.1.8",
     "lighting": "none",
     "matrix": {
         "rows": 10,
@@ -405,11 +407,11 @@
             [
                 {
                     "x": 2.0,
-                    "y": -0.6
+                    "y": -0.55
                 },
                 "9,4",
                 {
-                    "y": 0.15
+                    "y": 0.1
                 },
                 "9,5"
             ],

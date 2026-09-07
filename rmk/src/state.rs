@@ -75,6 +75,14 @@ pub(crate) fn update_status(f: impl FnOnce(&mut ConnectionStatus)) {
         crate::channel::clear_and_release_report_channel(prev_active);
     }
 
+    #[cfg(feature = "_ble")]
+    if prev.ble.state == BleState::Sleeping && new_active != Some(ConnectionType::Ble) {
+        // Reports accumulated for a sleeping bonded host must survive only the
+        // Sleeping -> Connected handoff. A profile/transport switch abandons
+        // that wake attempt and must not replay its keystrokes to another host.
+        crate::channel::BLE_REPORT_CHANNEL.clear();
+    }
+
     publish_event(ConnectionStatusChangeEvent(new));
 }
 
@@ -173,10 +181,15 @@ mod tests {
 
     use embassy_futures::select::{Either, select};
     use embassy_time::{Duration, Timer};
+    #[cfg(feature = "_ble")]
+    use rmk_types::ble::BleState;
 
+    #[cfg(feature = "_ble")]
+    use super::set_ble_state;
     use super::{
         CONNECTION_STATUS, ConnectionStatus, ConnectionType, UsbState, set_preferred_connection, set_usb_state,
     };
+    use crate::channel::QueuedReport;
     use crate::event::{ConnectionStatusChangeEvent, EventSubscriber, SubscribableEvent};
     use crate::hid::{KeyboardReport, Report};
     use crate::test_support::test_block_on as block_on;
@@ -203,8 +216,8 @@ mod tests {
         })
     }
 
-    fn assert_all_up_keyboard_report(report: Report) {
-        match report {
+    fn assert_all_up_keyboard_report(report: QueuedReport) {
+        match report.into_report() {
             Report::KeyboardReport(r) => {
                 assert_eq!(r.modifier, 0);
                 assert_eq!(r.reserved, 0);
@@ -256,6 +269,52 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "_ble")]
+    #[test]
+    fn wake_report_queues_without_blocking_keyboard_processing() {
+        use crate::channel::{BLE_REPORT_CHANNEL, send_hid_report};
+
+        let _guard = state_test_lock().lock().unwrap();
+        reset_state();
+        set_ble_state(BleState::Sleeping);
+
+        block_on(async {
+            send_hid_report(pressed_keyboard_report()).await;
+            send_hid_report(Report::KeyboardReport(KeyboardReport::default())).await;
+        });
+
+        match BLE_REPORT_CHANNEL
+            .try_receive()
+            .expect("the wake report should be retained before BLE reconnects")
+            .into_report()
+        {
+            Report::KeyboardReport(report) => assert_eq!(report.keycodes[0], 4),
+            _ => panic!("expected keyboard wake report"),
+        }
+        assert_all_up_keyboard_report(
+            BLE_REPORT_CHANNEL
+                .try_receive()
+                .expect("the wake key release should queue behind its press"),
+        );
+    }
+
+    #[cfg(all(not(feature = "_no_usb"), feature = "_ble"))]
+    #[test]
+    fn abandoning_sleep_for_usb_discards_pending_ble_reports() {
+        use crate::channel::{BLE_REPORT_CHANNEL, send_hid_report};
+
+        let _guard = state_test_lock().lock().unwrap();
+        reset_state();
+        set_preferred_connection(ConnectionType::Usb);
+        set_ble_state(BleState::Sleeping);
+        block_on(send_hid_report(pressed_keyboard_report()));
+        assert_eq!(BLE_REPORT_CHANNEL.len(), 1);
+
+        set_usb_state(UsbState::Configured);
+
+        assert!(BLE_REPORT_CHANNEL.try_receive().is_err());
+    }
+
     #[cfg(not(feature = "_no_usb"))]
     #[test]
     fn flipping_away_from_active_clears_stale_reports_and_queues_all_up() {
@@ -270,11 +329,11 @@ mod tests {
         // that would otherwise persist across a flip.
         USB_REPORT_CHANNEL.clear();
         USB_REPORT_CHANNEL
-            .try_send(pressed_keyboard_report())
+            .try_send(QueuedReport::new(pressed_keyboard_report()))
             .expect("channel should have capacity for sentinel");
         assert!(USB_REPORT_CHANNEL.try_receive().is_ok());
         USB_REPORT_CHANNEL
-            .try_send(pressed_keyboard_report())
+            .try_send(QueuedReport::new(pressed_keyboard_report()))
             .expect("channel should have capacity for sentinel");
 
         set_usb_state(UsbState::Disabled);
@@ -303,7 +362,7 @@ mod tests {
 
         for _ in 0..crate::REPORT_CHANNEL_SIZE {
             USB_REPORT_CHANNEL
-                .try_send(pressed_keyboard_report())
+                .try_send(QueuedReport::new(pressed_keyboard_report()))
                 .expect("channel should have capacity while filling");
         }
 
@@ -339,7 +398,7 @@ mod tests {
         assert_eq!(super::active_transport(), Some(ConnectionType::Ble));
 
         BLE_REPORT_CHANNEL
-            .try_send(pressed_keyboard_report())
+            .try_send(QueuedReport::new(pressed_keyboard_report()))
             .expect("BLE report channel should have capacity for sentinel");
 
         set_usb_state(UsbState::Configured);
@@ -368,7 +427,7 @@ mod tests {
 
         for _ in 0..crate::REPORT_CHANNEL_SIZE {
             USB_REPORT_CHANNEL
-                .try_send(Report::KeyboardReport(KeyboardReport::default()))
+                .try_send(QueuedReport::new(Report::KeyboardReport(KeyboardReport::default())))
                 .expect("channel should have capacity while filling");
         }
 

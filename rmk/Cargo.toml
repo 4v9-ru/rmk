@@ -58,7 +58,7 @@ display-interface-i2c = { version = "0.5", optional = true }
 
 # Optional dependencies
 # BLE dependencies
-trouble-host = { git = "https://github.com/embassy-rs/trouble", rev = "c21b1239fb86de712fc99da803def88378d81177", features = [
+trouble-host = { git = "https://github.com/embassy-rs/trouble", rev = "18df47dcf9907eb810ecbf9c613af3694d75f520", features = [
     "gatt",
     "scan",
     "derive",
@@ -110,6 +110,20 @@ cortex-m = { version = "0.7" }
 
 [features]
 default = ["defmt", "storage", "vial", "vial_lock", "watchdog"]
+
+## Enable low-rate RTT counters for transport latency diagnostics.
+rtt_diag = ["defmt"]
+
+## Pace merged mouse reports to the negotiated BLE HID slot.
+mouse_interval_control = []
+
+## Split oversized relative motion into vector-preserving chunks while
+## retaining BLE pacing from mouse_interval_control.
+mouse_vector_preserve = ["mouse_interval_control"]
+
+## Diagnostic control: keep the active host link at 15 ms / latency 0 so
+## A/B builds cannot diverge through the 7.5 ms bootstrap timing race.
+host_fixed_15ms = []
 
 ## Enable hardware watchdog support
 watchdog = ["rmk-macro/watchdog"]
@@ -209,7 +223,11 @@ async_matrix = []
 ## Enable split keyboard support.
 split = [
     "dep:embedded-io-async",
-    "trouble-host?/gatt-client-notification-queue-size-4",
+    "trouble-host?/default-packet-pool-size-32",
+    "trouble-host?/connection-event-queue-size-8",
+    "trouble-host?/l2cap-rx-queue-size-16",
+    "trouble-host?/l2cap-tx-queue-size-16",
+    "trouble-host?/gatt-client-notification-queue-size-8",
     "rmk-types/split",
 ]
 

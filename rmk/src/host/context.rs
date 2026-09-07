@@ -18,6 +18,7 @@ use rmk_types::action::{EncoderAction, KeyAction};
 use rmk_types::battery::BatteryStatus;
 use rmk_types::combo::Combo as ComboConfig;
 use rmk_types::connection::ConnectionStatus;
+use rmk_types::fork::Fork;
 use rmk_types::led_indicator::LedIndicator;
 use rmk_types::morse::{Morse, MorseProfile};
 
@@ -162,18 +163,19 @@ impl<'a> KeyboardContext<'a> {
         self.keymap.with_combos(f)
     }
 
-    /// Replace the combo at `idx` with `config` (or remove it if `config` is
-    /// empty) and persist. No-op if `idx` is out of range.
+    /// Replace the combo at `idx` with `config` (or remove it if actions,
+    /// output, and layer are all empty) and persist. No-op if `idx` is out of range.
     pub async fn set_combo(&self, idx: u8, config: ComboConfig) {
         let valid = self.keymap.with_combos_mut(|combos| {
             if (idx as usize) >= combos.len() {
                 return false;
             }
-            combos[idx as usize] = if config.actions.is_empty() && config.output == KeyAction::No {
-                None
-            } else {
-                Some(Combo::new(config.clone()))
-            };
+            combos[idx as usize] =
+                if config.actions.is_empty() && config.output == KeyAction::No && config.layer.is_none() {
+                    None
+                } else {
+                    Some(Combo::new(config.clone()))
+                };
             true
         });
         if !valid {
@@ -183,6 +185,29 @@ impl<'a> KeyboardContext<'a> {
         FLASH_CHANNEL.send(FlashOperationMessage::Combo { idx, config }).await;
         #[cfg(not(feature = "storage"))]
         let _ = config;
+    }
+
+    // ── Forks (Vial: key override) ───────────────────────────────────────
+
+    pub fn with_forks<R>(&self, f: impl FnOnce(&[Fork]) -> R) -> R {
+        self.keymap.with_forks(f)
+    }
+
+    /// Replace the fork at `idx` with `fork` and persist. No-op if `idx` is
+    /// out of range.
+    pub async fn set_fork(&self, idx: u8, fork: Fork) {
+        let valid = self.keymap.with_forks_mut(|forks| {
+            if (idx as usize) >= forks.len() {
+                return false;
+            }
+            forks[idx as usize] = fork;
+            true
+        });
+        if !valid {
+            return;
+        }
+        #[cfg(feature = "storage")]
+        FLASH_CHANNEL.send(FlashOperationMessage::Fork { idx, fork }).await;
     }
 
     // ── Morses (Vial: tap-dance) ─────────────────────────────────────────

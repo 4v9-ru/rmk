@@ -4,12 +4,14 @@
     "vendorId": "0xE126",
     "productId": "0x0076",
     "entropy": {
+        "firmwareUpdate": { "asset": "k04-micro" },
         "batteryHalves": true
     },
     "firmware": {
-        "version": "0.1.6"
+        "name": "RMK",
+        "version": "0.1.9"
     },
-    "firmwareVersion": "0.1.6",
+    "firmwareVersion": "0.1.9",
     "lighting": "none",
     "matrix": {
         "rows": 8,

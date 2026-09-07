@@ -1,11 +1,30 @@
 use const_gen::*;
+use rmk::config::{BehaviorConfig, MouseKeyConfig, RmkConfig};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 use xz2::read::XzEncoder;
 
+
 fn main() {
+    // Define your custom acceleration profile
+    let mouse_config = MouseKeyConfig {
+        initial_delay_ms: 80,
+        repeat_interval_ms: 16, // Should match your [rmk].mouse_key_interval
+        move_delta: 6,          // Increase for faster base speed
+        max_speed: 5,           // Max multiplier cap
+        ticks_to_max: 30,       // Reach max speed faster (30 ticks)
+    };
+
+    let rmk_config = RmkConfig {
+        behavior_config: BehaviorConfig {
+            mouse_key: mouse_config,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
     const FIRMWARE_VERSION: &str = "0.1.8";
     const FIRMWARE_VERSION_BCD: &str = "0x0108";
 

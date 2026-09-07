@@ -109,6 +109,8 @@ macro_space_size = 2048
 ble_profiles_num = 5
 protocol_max_bulk_size = 8
 protocol_macro_chunk_size = 64
+mouse_key_interval = 40
+mouse_wheel_interval = 80
 
 [storage]
 start_addr = 0xCC000
@@ -118,3 +120,10 @@ clear_storage = false
 # Prevent cargo from looking for a workspace above this directory
 [workspace]
 members = ["."]
+
+[behavior.mouse_key]
+initial_delay_ms = 80
+repeat_interval_ms = 16   # Faster refresh rate matching 60Hz intervals
+move_delta = 6
+max_speed = 5             # Multiplies up to 30 pixels per tick
+ticks_to_max = 30         # Reaches top speed in about half a second
